@@ -1,0 +1,60 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(data) {
+      return isSignedIn() && data.userId == request.auth.uid;
+    }
+
+    function isValidItem(data) {
+      return data.keys().hasOnly([
+          'userId',
+          'name',
+          'description',
+          'imageBase64',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasAll([
+          'userId',
+          'name',
+          'description',
+          'imageBase64',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.userId is string
+        && data.userId == request.auth.uid
+        && data.name is string
+        && data.name.size() > 0
+        && data.name.size() <= 120
+        && data.description is string
+        && data.description.size() > 0
+        && data.description.size() <= 2000
+        && data.imageBase64 is string
+        && data.imageBase64.size() > 0
+        && data.imageBase64.size() <= 900000
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    match /hotwheels_items/{itemId} {
+      allow read: if isOwner(resource.data);
+
+      allow create: if isSignedIn()
+        && request.resource.data.userId == request.auth.uid
+        && isValidItem(request.resource.data);
+
+      allow update: if isOwner(resource.data)
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.createdAt == resource.data.createdAt
+        && isValidItem(request.resource.data);
+
+      allow delete: if isOwner(resource.data);
+    }
+  }
+}

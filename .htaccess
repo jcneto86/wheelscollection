@@ -1,0 +1,70 @@
+# ============================================================================
+# Wheels Collection — Apache configuration for Hostinger shared hosting
+#
+# The app uses hash routing (#/settings, #/collection/:id), so no mod_rewrite
+# fallback is required. This file adds compression, caching and basic security
+# headers. Upload it to public_html/app/ together with the other files.
+# ============================================================================
+
+Options -Indexes -MultiViews
+DirectoryIndex index.html
+AddDefaultCharset UTF-8
+AddType application/manifest+json .webmanifest
+
+# ---------------------------------------------------------------------------
+# Compression
+# ---------------------------------------------------------------------------
+<IfModule mod_deflate.c>
+  AddOutputFilterByType DEFLATE text/html text/plain text/css text/javascript
+  AddOutputFilterByType DEFLATE application/javascript application/json
+  AddOutputFilterByType DEFLATE application/manifest+json image/svg+xml
+</IfModule>
+
+# ---------------------------------------------------------------------------
+# Cache
+#
+# HTML and translation dictionaries are always revalidated so content updates
+# appear immediately. Static assets use a short cache and are revalidated.
+# ---------------------------------------------------------------------------
+<IfModule mod_headers.c>
+  <FilesMatch "\.(html|json|webmanifest)$">
+    Header set Cache-Control "no-cache, must-revalidate"
+  </FilesMatch>
+
+  <Files "firebase-config.js">
+    Header set Cache-Control "no-cache, must-revalidate"
+  </Files>
+
+  <FilesMatch "\.(css|js|svg)$">
+    Header set Cache-Control "public, max-age=3600, must-revalidate"
+  </FilesMatch>
+
+  # Basic security headers. A CSP is intentionally omitted because Tailwind's
+  # CDN and Firebase require inline/eval and cross-origin connections.
+  Header set X-Content-Type-Options "nosniff"
+  Header set Referrer-Policy "strict-origin-when-cross-origin"
+  Header set X-Frame-Options "SAMEORIGIN"
+  Header set Permissions-Policy "camera=(self), microphone=(), geolocation=()"
+  Header set Cross-Origin-Opener-Policy "same-origin-allow-popups"
+</IfModule>
+
+# ---------------------------------------------------------------------------
+# Do not expose local tooling or the generated build folder
+# ---------------------------------------------------------------------------
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteRule ^(?:tools|build|\.wheels)(?:/|$) - [F,L]
+</IfModule>
+
+# ---------------------------------------------------------------------------
+# Do not expose deployment files or documentation
+# ---------------------------------------------------------------------------
+<FilesMatch "^(firebase\.json|firebase-debug\.log|firestore\.rules|firestore\.indexes\.json|README\.md|README\.pt-BR\.md|package\.json|package-lock\.json|wheels\.cmd|wheels\.sh|\.firebaserc|\.firebase.*|\.env.*|\.git.*|\.htaccess)$">
+  <IfModule mod_authz_core.c>
+    Require all denied
+  </IfModule>
+  <IfModule !mod_authz_core.c>
+    Order allow,deny
+    Deny from all
+  </IfModule>
+</FilesMatch>

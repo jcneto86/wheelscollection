@@ -1,0 +1,20 @@
+{
+  "name": "wheels-collection-web",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Wheels Collection - SPA estatica com Firebase, ferramentas de debug e build",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "menu": "node tools/wheels.mjs",
+    "dev": "node tools/wheels.mjs dev",
+    "start": "node tools/wheels.mjs dev",
+    "check": "node tools/wheels.mjs check",
+    "check:online": "node tools/wheels.mjs check --online",
+    "configure": "node tools/wheels.mjs configure",
+    "build": "node tools/wheels.mjs build",
+    "build:open": "node tools/wheels.mjs build --open"
+  }
+}

@@ -1,0 +1,3 @@
+# Private collection app: keep search engines out.
+User-agent: *
+Disallow: /

@@ -7,7 +7,7 @@ Esta é a versão que substitui o aplicativo Flutter: não precisa de compilaç�
 não usa Flutter Web e roda em qualquer hospedagem compartilhada, inclusive na
 Hostinger, dentro de `public_html/app`.
 
-- **Front-end:** HTML5, Tailwind CSS (CDN) e Alpine.js 3.14.9 (ESM).
+- **Front-end:** HTML5, Tailwind CSS (compilado em `css/tailwind.css`) e Alpine.js 3.14.9 (ESM).
 - **Back-end as a Service:** Firebase Auth (e-mail/senha) e Cloud Firestore.
 - **Imagens:** recorte quadrado no navegador com Canvas, exportadas em
   **500 × 500 px** e salvas como **Base64 dentro do documento do Firestore**.
@@ -24,14 +24,16 @@ Hostinger, dentro de `public_html/app`.
 appphp/
 ├── index.html                 # Toda a interface da SPA (telas, modais, navbar)
 ├── css/
+│   ├── tailwind.css           # GERADO por "npm run css" (não editar)
 │   └── styles.css             # Tokens das 5 paletas, tema escuro e componentes
 ├── js/
-│   ├── app.js                 # Controlador Alpine: sessão, rotas, CRUD, busca, crop
+│   ├── controller.js          # Componente Alpine: sessão, rotas, CRUD, busca, crop
+│   ├── app.js                 # Motor de OCR local (Tesseract.js) e parsers da embalagem
 │   ├── firebase-config.js     # Configuração pública do Firebase + limites
 │   ├── firebase.js            # Inicialização, Auth e Firestore
 │   ├── i18n.js                # Carregamento e tradução dos dicionários
 │   ├── image-crop.js          # Crop/zoom/rotação em Canvas e exportação 500×500
-│   ├── ocr.js                 # OCR local (Tesseract.js) e parsers da embalagem
+│   ├── ocr.js                 # Pipeline de pré-processamento (cinza, CLAHE, escala, margem)
 │   ├── preferences.js         # Tema, paleta e idioma em localStorage
 │   └── router.js              # Roteador por hash
 ├── lang/
@@ -47,6 +49,8 @@ appphp/
 │   ├── .htaccess              # bloqueia acesso se a pasta for enviada por engano
 │   └── lib/                   # módulos internos do CLI
 ├── package.json               # atalhos npm (não publicar)
+├── tailwind.config.cjs        # Config do Tailwind usada por "npm run css" (não publicar)
+├── tailwind.src.css           # Ponto de entrada do CLI do Tailwind (não publicar)
 ├── build/                     # GERADO por "npm run build" (não editar)
 ├── .wheels/                   # GERADO: backups e manifesto do último build
 ├── .htaccess                  # Cache, compressão e cabeçalhos (Apache/LiteSpeed)
@@ -61,8 +65,9 @@ appphp/
 
 > Arquivos de desenvolvimento (`README.md`, `README.pt-BR.md`, `firebase.json`,
 > `firestore.rules`, `firestore.indexes.json`, `.firebaserc`, `tools/`,
-> `package.json`, `build/` e `.wheels/`) **não precisam** ser enviados para a
-> Hostinger. O comando `build` já monta uma pasta limpa apenas com o runtime.
+> `package.json`, `tailwind.config.cjs`, `tailwind.src.css`, `build/` e
+> `.wheels/`) **não precisam** ser enviados para a Hostinger. O comando `build`
+> já monta uma pasta limpa apenas com o runtime.
 > O `.htaccess` também bloqueia esses caminhos caso algo seja enviado por engano.
 
 ### Rotas
@@ -238,6 +243,7 @@ Chaves usadas em `localStorage` (definidas em `js/preferences.js`):
 | `wheels.themeMode` | `light`, `dark`, `system` | `system` |
 | `wheels.palette` | `crimson`, `ocean`, `emerald`, `violet`, `amber` | `crimson` |
 | `wheels.locale` | `en-CA`, `fr-CA`, `pt-BR` | idioma do navegador |
+| `wheels.ocrAuto` | `1`, `0` | `1` (leitura automática da embalagem) |
 
 - O tema `system` acompanha `prefers-color-scheme` em tempo real.
 - As paletas são aplicadas por variáveis CSS em `<html data-palette="...">`.
@@ -300,19 +306,27 @@ Observações:
 
 ### 5.1 OCR local da embalagem (Tesseract.js)
 
-O botão **Escanear embalagem**, exibido acima dos campos Nome e Descrição em
-`#/collection/new` e `#/collection/:id/edit`, executa OCR local no navegador:
+O formulário em `#/collection/new` e `#/collection/:id/edit` lê a embalagem
+localmente, logo depois de aplicar o recorte:
 
+- **automático por padrão**: ao concluir "Aplicar recorte", a leitura começa
+  ~350 ms depois, sem clique;
+- o botão **Escanear embalagem** passa a **Ler novamente**: é a saída quando a
+  leitura automática falha e o único caminho que sobrescreve campos já
+  preenchidos;
+- o resultado automático **nunca sobrescreve** o que o usuário digitou — só
+  preenche campos vazios;
 - o Tesseract.js 7 é carregado sob demanda do CDN jsDelivr, somente na primeira
   leitura;
-- o worker processa a imagem Base64 já recortada, sem enviar a foto a um
-  servidor de OCR;
-- o layout é analisado em etapas: cartela inteira, faixa inferior (nome do
-  modelo), faixa lateral girada (nome da coleção) e, se necessário, uma região
-  focada no número da coleção;
+- o reconhecimento roda em um **canvas de 1600 px em memória**, derivado da foto
+  original (não da imagem 500×500 salva), então o texto pequeno da embalagem
+  chega com cerca do dobro da resolução anterior. Nada extra é persistido;
+- o layout é analisado com regiões candidatas e saída antecipada: cartela
+  inteira, faixa inferior (nome do modelo), faixa lateral girada (nome da
+  coleção) e, se necessário, uma região focada no número da coleção;
 - `extractCarName`, `extractCollectionNumber` e `extractDescription` limpam o
-  texto, descartam ruídos (MATTEL, HOT WHEELS, faixas etárias, códigos, avisos
-  de direitos autorais) e sugerem Nome e Descrição;
+  texto, descartam ruídos (MATTEL, HOT WHEELS, faixas etárias, códigos, escalas
+  como `1/64`, avisos de direitos autorais) e sugerem Nome e Descrição;
 - a descrição usa o formato `Nome da coleção · XX/YYY`, por exemplo
   `HW THE '90S · 2/10`;
 - o resultado é apenas sugestivo: os campos continuam editáveis e a persistência
@@ -320,13 +334,21 @@ O botão **Escanear embalagem**, exibido acima dos campos Nome e Descrição em
 
 Observações:
 
-- a primeira leitura baixa o core do Tesseract e o modelo `eng` (alguns MB);
-  depois o navegador reutiliza o cache;
+- a primeira leitura baixa o core do Tesseract e o modelo `eng` (**~7 MB**);
+  depois o navegador reutiliza o cache. O painel mostra o download e oferece
+  **Cancelar**;
+- a leitura automática é pulada quando o navegador informa `saveData`, conexão
+  2G, ou quando a caixa **Ler a embalagem automaticamente** está desmarcada
+  (`wheels.ocrAuto` no `localStorage`);
 - fotos nítidas, sem reflexo e com a cartela inteira melhoram a assertividade;
-- a imagem usada é a versão recortada em 500×500; para embalagens com texto
-  muito pequeno, aproxime a câmera antes do recorte;
+- em edição sem foto nova não existe canvas de alta resolução, então o scanner
+  cai para a imagem de 500×500 salva (precisão menor);
 - o botão fica desabilitado enquanto não há foto ou enquanto a leitura está em
   andamento.
+
+Diagnóstico: `localStorage.setItem('wheels.ocrDebug', '1')` guarda os seis
+últimos recortes enviados ao Tesseract em `window.__wheelsOcrDebug` (cada item
+tem a região, o tempo, o texto bruto e um helper `toPng()`).
 
 ---
 
@@ -370,6 +392,7 @@ Comandos diretos:
 npm run dev -- --port 3000   # servidor em http://localhost:3000
 npm run check                # arquivos, HTML, CSS, JS, traduções e Firebase
 npm run check:online         # também testa CDNs e a apiKey
+npm run css                  # recompila css/tailwind.css após mudar classes
 npm run configure            # grava as chaves em js/firebase-config.js
 npm run build                # gera build/ pronta para a Hostinger
 ```
@@ -488,7 +511,7 @@ O comando:
 Saída esperada:
 
 ```text
-[OK] Build concluido: 16 arquivos, 188.8 KB.
+[OK] Build concluido: 27 arquivos, 640.5 KB.
 Conteudo de build/:
 - index.html
 - manifest.webmanifest
@@ -598,32 +621,43 @@ Se usar `index.min.html`, renomeie para `index.html` **depois de testar**.
 O mesmo vale para CSS/JS. Evite minificar `firebase-config.js` manualmente
 antes de configurar as chaves.
 
-### 7.6 Opcional: Tailwind compilado (produção)
+### 7.6 Tailwind é compilado (sem CDN)
 
-O projeto usa o **Tailwind Play CDN** por requisito. Ele compila as classes no
-navegador e mostra um aviso no console de que não é recomendado para produção.
-Para uma versão mais rápida:
+O app carrega uma folha **já compilada**, `css/tailwind.css`. Não existe mais
+`cdn.tailwindcss.com`: o CDN compilava as classes no navegador a cada carga,
+imprimia um aviso de produção e custava ~400 KB de JavaScript.
 
-1. Instale o Tailwind CLI (`npm i -D tailwindcss`).
-2. Crie `tailwind.config.js` com `darkMode: 'class'`, `content` apontando para
-   `index.html` e `js/**/*.js`, e a paleta `brand` com as variáveis CSS.
-3. Crie `css/tailwind.src.css` com `@tailwind base; @tailwind components;
-   @tailwind utilities;`.
-4. Gere `css/tailwind.css` com `npx tailwindcss -i css/tailwind.src.css -o
-   css/tailwind.css --minify`.
-5. No `index.html`, remova o `<script src="https://cdn.tailwindcss.com">`, o
-   bloco `tailwind.config` e troque por
-   `<link rel="stylesheet" href="css/tailwind.css">`, mantendo
-   `css/styles.css` depois dele.
+Como funciona:
 
-O CDN foi mantido para o app funcionar sem build, como solicitado. Se você não
-fizer essa etapa, basta ter internet no primeiro carregamento.
+- `tailwind.config.cjs` (raiz) declara `darkMode: 'class'`, os `content`
+  (`index.html`, `js/**/*.js`) e a paleta `brand` ligada às variáveis CSS;
+- `tailwind.src.css` (raiz) é o ponto de entrada do CLI;
+- `css/tailwind.css` é a saída gerada e **fica versionada**, então o app
+  continua funcionando sem build.
+
+Regenere quando nomes de classe mudarem:
+
+```bash
+npm run css         # uma vez, minificado (~26 KB)
+npm run css:watch   # reconstrói enquanto você edita o index.html
+```
+
+O `npm run check` compara as datas e avisa quando `index.html` ou algum
+`js/*.js` está mais novo que `css/tailwind.css` — sinal de que a folha precisa
+ser regerada. A primeira execução precisa de internet, porque o `npx` baixa o
+`tailwindcss@3`; depois ele vem do cache do npm.
+
+Se você usar uma classe que o Tailwind não gera (valor arbitrário com espaço,
+ou classe montada dinamicamente em JavaScript), inclua-a num `safelist` do
+`tailwind.config.cjs`.
 
 ### 7.7 Versionamento e cache
 
 - `index.html`, `lang/*.json` e `firebase-config.js` são servidos com
   `no-cache` + revalidação pelo `.htaccess`.
-- CSS, JS e SVG têm cache de 1 hora com revalidação.
+- CSS e JS são revalidados a cada carregamento (`no-cache, must-revalidate`):
+  o deploy aparece no próximo recarregamento e um arquivo igual custa um 304.
+  Ícones e fontes mantêm cache de 1 dia.
 - Após atualizar arquivos, limpe o cache da Hostinger (seção 8.7) e faça um
   hard refresh (`Ctrl+Shift+R`).
 - Se precisar forçar a troca de um arquivo específico, adicione `?v=2` nas
@@ -784,8 +818,9 @@ Se preferir `https://app.seudominio.com`:
 | Preferências somem | Navegação privada/limpeza automática | Use uma janela normal; o comportamento é esperado |
 | 404 ao recarregar uma rota | URL sem `#` | Use `#/rota`; o app é SPA com hash e não precisa de rewrite |
 | Erro 500 no `.htaccess` | `Options`/diretivas não permitidas | Remova a linha `Options -Indexes -MultiViews` e teste; mantenha o restante |
-| CSS quebrado em produção | CDN do Tailwind bloqueado | Libere `cdn.tailwindcss.com` ou compile o Tailwind (7.6) |
+| CSS quebrado em produção | `css/tailwind.css` ausente ou desatualizado | Rode `npm run css` e reenvie `css/`; o `npm run check` avisa quando a folha está mais antiga que o HTML |
 | Cache antigo após deploy | LiteSpeed/Cloudflare/navegador | Limpe os três caches e faça hard refresh |
+| `does not provide an export named …` após o deploy | O navegador ou a hospedagem manteve um `js/app.js` antigo enquanto o `index.html`/`controller.js` já eram os novos (grafo de módulos misturado) | Hard refresh (`Ctrl+Shift+R`) e purgue o cache da hospedagem. Como o `.htaccess` agora envia `no-cache` para JS, do próximo deploy em diante basta recarregar |
 | `quota-exceeded` | Limite diário do Firestore | Aguarde a renovação ou ajuste o plano |
 | Login local funciona, produção não | Domínio autorizado ausente | Adicione o domínio de produção no Firebase |
 
@@ -843,7 +878,7 @@ As cores do terminal podem ser desativadas com `NO_COLOR=1` (ou
 
 O app é privado: `robots.txt` bloqueia indexação e o `index.html` tem
 `<meta name="robots" content="noindex, nofollow">`. Não há analytics nem
-cookies de terceiros; apenas Firebase e os CDNs de Tailwind/Alpine.
+cookies de terceiros; apenas Firebase e o CDN jsDelivr (Alpine e Tesseract).
 
 ---
 
@@ -865,8 +900,8 @@ cookies de terceiros; apenas Firebase e os CDNs de Tailwind/Alpine.
 - Não há verificação de e-mail, exclusão de conta ou login social (não faziam
   parte do escopo original).
 - Não há upload de múltiplas fotos por carrinho; o modelo tem uma imagem.
-- O Tailwind Play CDN compila no navegador; para máxima performance, siga a
-  seção 7.6.
+- O Tailwind é compilado: uma classe nova só aparece depois de `npm run css`
+  (seção 7.6).
 - Não há service worker; o app não funciona offline.
 - O OCR usa Tesseract.js via CDN: a primeira leitura exige internet para baixar
   o core e o modelo de idioma. O reconhecimento é local e a foto não é enviada

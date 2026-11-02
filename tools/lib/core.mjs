@@ -33,9 +33,10 @@ export const RUNTIME_DIRS = ['css', 'js', 'lang', 'assets'];
 export const REQUIRED_FILES = [
   ...RUNTIME_FILES,
   ...RUNTIME_DIRS.flatMap((dir) => {
-    if (dir === 'css') return ['css/styles.css'];
+    if (dir === 'css') return ['css/styles.css', 'css/tailwind.css'];
     if (dir === 'js') {
       return [
+        'js/controller.js',
         'js/app.js',
         'js/firebase.js',
         'js/firebase-config.js',

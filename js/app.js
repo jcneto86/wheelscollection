@@ -13,7 +13,13 @@
  *      90-degree rotation for vertical collection strips;
  *   4. `extractCarName`, `extractDescription` and `extractCollectionNumber`
  *      parse the combined lines with noise filters and scores.
+ *
+ * Pixel work is delegated to `prepareRegion` (./ocr.js), which owns the
+ * grayscale/channel/CLAHE pipeline, the isotropic scale and the padding.
  */
+
+import { prepareRegion } from './ocr.js';
+import { loadOcrAuto, saveOcrAuto } from './preferences.js';
 
 /* -------------------------------------------------------------------------- */
 /* Tesseract.js configuration                                                 */
@@ -24,8 +30,15 @@ const TESSERACT_ESM_URL =
   `https://cdn.jsdelivr.net/npm/tesseract.js@${TESSERACT_VERSION}/dist/tesseract.esm.min.js`;
 const TESSERACT_WORKER_URL =
   `https://cdn.jsdelivr.net/npm/tesseract.js@${TESSERACT_VERSION}/dist/worker.min.js`;
+/*
+ * The core package has its own version line: `tesseract.js@7` depends on
+ * `tesseract.js-core@^7`. Bumping TESSERACT_VERSION without bumping
+ * TESSERACT_CORE_VERSION makes createWorker fail with a generic
+ * `ocr-unavailable`, so both live side by side on purpose.
+ */
+const TESSERACT_CORE_VERSION = '7.0.0';
 const TESSERACT_CORE_URL =
-  `https://cdn.jsdelivr.net/npm/tesseract.js-core@${TESSERACT_VERSION}`;
+  `https://cdn.jsdelivr.net/npm/tesseract.js-core@${TESSERACT_CORE_VERSION}`;
 const TESSERACT_LANG_URL =
   'https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng@1.0.0/4.0.0_best_int';
 
@@ -41,12 +54,66 @@ const PHASE_RANGES = Object.freeze({
   parsing: [0.9, 1],
 });
 
-/** Fallback bands used only when the full pass does not reveal a region. */
-const FALLBACK_REGIONS = Object.freeze({
-  bottom: { x: 0.02, y: 0.58, w: 0.86, h: 0.4 },
-  side: { x: 0.7, y: 0.28, w: 0.29, h: 0.7 },
-  number: { x: 0.58, y: 0, w: 0.4, h: 0.45 },
+/*
+ * Candidate regions, in normalised card coordinates. They are tried in order
+ * and the first one that satisfies the parser wins, so a layout the full pass
+ * failed to detect still gets read. Coordinates come from measurements on a
+ * 2023+ card (number above the blister, strip on the right edge of the
+ * blister) plus the older layout.
+ */
+const PRIORS = Object.freeze({
+  bottom: [
+    { x: 0.03, y: 0.74, w: 0.72, h: 0.16 }, // just below the blister
+    { x: 0.02, y: 0.62, w: 0.86, h: 0.3 }, // wide fallback
+  ],
+  side: [
+    { x: 0.5, y: 0.3, w: 0.14, h: 0.66 }, // 2023+ card
+    { x: 0.62, y: 0.25, w: 0.16, h: 0.7 },
+    { x: 0.78, y: 0.18, w: 0.2, h: 0.78 }, // older card
+  ],
+  number: [
+    { x: 0.51, y: 0.45, w: 0.12, h: 0.1 }, // above the blister
+    { x: 0.55, y: 0.02, w: 0.42, h: 0.2 }, // top-right corner
+  ],
 });
+
+const FULL_REGION = Object.freeze({ x: 0, y: 0, w: 1, h: 1 });
+
+/**
+ * Per-pass preprocessing. `targetLongSide` is expressed in output pixels and
+ * `maxScale` caps the upscale, so a 60 px crop is no longer blown up 20x into
+ * a 1200 px canvas (pure interpolation, no extra information).
+ */
+const PREP = Object.freeze({
+  full: { targetLongSide: 1200, maxScale: 1.5, pad: 0, enhance: false },
+  bottom: { targetLongSide: 1200, maxScale: 4, pad: 16, enhance: true },
+  side: { targetLongSide: 1400, maxScale: 4, pad: 16, enhance: true },
+  number: { targetLongSide: 800, maxScale: 6, pad: 16, enhance: true },
+});
+
+/** Scale denominators printed on packaging ("SCALE 1:64"), never collection. */
+const SCALE_TOTALS = new Set([12, 16, 18, 24, 32, 43, 50, 64, 72, 87, 100]);
+const SCALE_WORDS = /\b(?:SCALE|ÉCHELLE|ESCALA)\b/i;
+const COLLECTION_WORDS = /\b(?:COLLECTION|COLE[CÇ][AÃ]O|S[EÉ]RIE|SERIES)\b/i;
+
+/** Delay before the automatic scan so the crop modal can close and paint. */
+export const AUTO_SCAN_DELAY = 350;
+
+/**
+ * Diagnostics. Enable with `localStorage.setItem('wheels.ocrDebug', '1')` and
+ * inspect `window.__wheelsOcrDebug` — each entry holds the exact canvas that
+ * was sent to Tesseract plus the raw text and the pass duration.
+ *
+ * Read lazily: importing this module must not touch `localStorage` (it throws
+ * in Node and is blocked in some private-browsing modes).
+ */
+function isOcrDebugEnabled() {
+  try {
+    return localStorage.getItem('wheels.ocrDebug') === '1';
+  } catch {
+    return false;
+  }
+}
 
 /* -------------------------------------------------------------------------- */
 /* Vocabulary used by the parsers                                             */
@@ -287,15 +354,20 @@ const VALID_COLLECTION_TOTALS = [5, 10, 250];
 const ocrCache = new Map();
 const MAX_CACHE_SIZE = 50;
 
-async function hashImage(imageBase64) {
-  const str = String(imageBase64 || '').slice(0, 1000);
+/**
+ * Cheap content hash used as the cache key. The first 1 000 characters of a
+ * JPEG base64 are basically its header, so the payload length is mixed in to
+ * keep two different photos from colliding on the same key.
+ */
+function hashImage(imageBase64) {
+  const str = String(imageBase64 || '');
+  const sample = str.slice(0, 1000);
   let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    const char = str.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
-    hash = hash & hash;
+  for (let i = 0; i < sample.length; i += 1) {
+    hash = ((hash << 5) - hash) + sample.charCodeAt(i);
+    hash |= 0;
   }
-  return hash.toString(16);
+  return `${(hash >>> 0).toString(36)}-${str.length}`;
 }
 
 function cacheGet(hash) {
@@ -323,8 +395,8 @@ function cacheSet(hash, data) {
 
 let workerPromise = null;
 let workerInstance = null;
-let progressSink = null;
-let activePhase = null;
+/** Context of the scan that is currently talking to the worker. */
+let activeRun = null;
 
 /**
  * Loads and caches one Tesseract worker. The language data is cached by
@@ -332,13 +404,6 @@ let activePhase = null;
  */
 async function getWorker() {
   if (workerPromise) return workerPromise;
-
-  activePhase = {
-    stage: 'library',
-    start: PHASE_RANGES.library[0],
-    end: PHASE_RANGES.library[1],
-  };
-  emitProgress('library', activePhase.start, 'loading tesseract');
 
   workerPromise = (async () => {
     const module = await import(TESSERACT_ESM_URL);
@@ -372,8 +437,7 @@ async function getWorker() {
 
 /** Frees the worker and all language data held in memory. */
 export async function terminateOcr() {
-  progressSink = null;
-  activePhase = null;
+  activeRun = null;
 
   const worker = workerInstance;
   workerInstance = null;
@@ -388,24 +452,79 @@ export async function terminateOcr() {
   }
 }
 
-function handleTesseractLog(message = {}) {
-  if (!progressSink || !activePhase) return;
+/* -------------------------------------------------------------------------- */
+/* Progress context                                                           */
+/* -------------------------------------------------------------------------- */
 
-  const phase = PHASE_RANGES[activePhase.stage] || PHASE_RANGES.library;
-  const localProgress = clamp(Number(message.progress) || 0, 0, 1);
-  const overall =
-    phase[0] + (phase[1] - phase[0]) * localProgress;
-
-  emitProgress(activePhase.stage, overall, message.status || '');
+function createRun(options = {}) {
+  return {
+    worker: null,
+    sink: typeof options.onProgress === 'function' ? options.onProgress : null,
+    signal: options.signal || null,
+    lastProgress: 0,
+    stage: null,
+    collected: [],
+    raw: [],
+  };
 }
 
-function emitProgress(stage, progress, detail = '') {
-  if (typeof progressSink !== 'function') return;
-  progressSink({
-    stage,
-    progress: clamp(progress, 0, 1),
-    detail,
+function setStage(run, stage) {
+  run.stage = stage;
+}
+
+/**
+ * Monotonic progress. The worker logger and the explicit stage boundaries used
+ * to fight over the same value, so the bar went backwards on the first run.
+ */
+function emitProgress(run, stage, progress, detail = '') {
+  const next = clamp(Number(progress) || 0, 0, 1);
+  run.lastProgress = Math.max(run.lastProgress, next);
+  if (typeof run.sink !== 'function') return;
+  run.sink({ stage, progress: run.lastProgress, detail });
+}
+
+function handleTesseractLog(message = {}) {
+  const run = activeRun;
+  if (!run || !run.stage) return;
+
+  const range = PHASE_RANGES[run.stage] || PHASE_RANGES.library;
+  const local = clamp(Number(message.progress) || 0, 0, 1);
+  const overall = range[0] + (range[1] - range[0]) * local;
+
+  emitProgress(run, run.stage, overall, message.status || '');
+}
+
+function isAbortError(error) {
+  return error?.name === 'AbortError' || error?.message === 'ocr-aborted';
+}
+
+function assertNotAborted(run) {
+  if (!run.signal?.aborted) return;
+  const error = new Error('ocr-aborted');
+  error.name = 'AbortError';
+  throw error;
+}
+
+function now() {
+  return typeof performance !== 'undefined' && typeof performance.now === 'function'
+    ? performance.now()
+    : Date.now();
+}
+
+/** Keeps the last few crops in memory for diagnosis (opt-in via localStorage). */
+function rememberPass(entry) {
+  if (typeof window === 'undefined') return;
+  const bucket = window.__wheelsOcrDebug || (window.__wheelsOcrDebug = []);
+  bucket.push({
+    stage: entry.stage,
+    region: entry.region,
+    rotate: entry.rotate,
+    ms: Math.round(entry.ms),
+    text: String(entry.text || ''),
+    canvas: entry.canvas,
+    toPng: () => entry.canvas.toDataURL('image/png'),
   });
+  while (bucket.length > 6) bucket.shift();
 }
 
 /* -------------------------------------------------------------------------- */
@@ -413,227 +532,276 @@ function emitProgress(stage, progress, detail = '') {
 /* -------------------------------------------------------------------------- */
 
 /**
- * Scans a Hot Wheels blister card encoded as a base64 string.
+ * Queue of scans. A single worker means a single recognition at a time, and
+ * serialising also keeps progress events from two cards from interleaving.
+ */
+let scanQueue = Promise.resolve();
+
+/**
+ * Scans a Hot Wheels blister card.
+ *
+ * The base64 payload is still the identity of the scan (cache key and the
+ * fallback source), but callers that just cropped a photo should pass
+ * `sourceImage` so recognition runs on the original pixels instead of the
+ * 500 x 500 derivative that gets stored.
  *
  * @param {string} imageBase64 Base64 JPEG/PNG (with or without the data: prefix).
- * @param {{ onProgress?: (event: { stage: string, progress: number, detail: string }) => void }} [options]
+ * @param {{
+ *   onProgress?: (event: { stage: string, progress: number, detail: string }) => void,
+ *   sourceImage?: HTMLCanvasElement|HTMLImageElement|ImageBitmap,
+ *   signal?: AbortSignal,
+ * }} [options]
  * @returns {Promise<{ name: string, description: string, collectionName: string,
  *   collectionNumber: string, rawText: string, lines: Array<object> }>}
  */
-export async function scanHotWheelsCard(imageBase64, options = {}) {
-  progressSink =
-    typeof options.onProgress === 'function' ? options.onProgress : null;
+export function scanHotWheelsCard(imageBase64, options = {}) {
+  const job = scanQueue.then(() => runScan(imageBase64, options));
+  scanQueue = job.then(
+    () => undefined,
+    () => undefined,
+  );
+  return job;
+}
 
-  // Check cache first
-  const cacheHash = await hashImage(imageBase64);
-  const cached = cacheGet(cacheHash);
+async function runScan(imageBase64, options) {
+  const run = createRun(options);
+
+  /*
+   * 1. Source pixels. Prefer the in-memory crop with the original resolution;
+   *    fall back to the stored base64 when editing an item without a new photo.
+   */
+  let source = normalizeSource(options.sourceImage);
+  if (!source) {
+    try {
+      source = await loadImage(imageBase64);
+    } catch (error) {
+      throw new Error('ocr-image-decode', { cause: error });
+    }
+  }
+
+  const cacheKey = `${hashImage(imageBase64)}:${options.sourceImage ? 'hi' : 'lo'}`;
+  const cached = cacheGet(cacheKey);
   if (cached) {
-    emitProgress('parsing', 1, 'from cache');
+    emitProgress(run, 'parsing', 1, 'from cache');
     return cached;
   }
 
-  emitProgress('preparing', PHASE_RANGES.preparing[0], 'decoding image');
+  setStage(run, 'library');
+  emitProgress(run, 'library', 0, 'loading tesseract');
 
-  let image;
+  activeRun = run;
+
   try {
-    image = await loadImage(imageBase64);
-  } catch (error) {
-    throw new Error('ocr-image-decode', { cause: error });
-  }
-
-  activePhase = {
-    stage: 'preparing',
-    start: PHASE_RANGES.preparing[0],
-    end: PHASE_RANGES.preparing[1],
-  };
-  emitProgress('preparing', PHASE_RANGES.preparing[1], 'image ready');
-
-  activePhase = {
-    stage: 'analyzing',
-    start: PHASE_RANGES.analyzing[0],
-    end: PHASE_RANGES.analyzing[1],
-  };
-  emitProgress('analyzing', PHASE_RANGES.analyzing[0], 'analysing layout');
-
-  let worker;
-  try {
-    worker = await getWorker();
-  } catch (error) {
-    throw new Error('ocr-unavailable', { cause: error });
-  }
-
-  const collected = [];
-  const rawParts = [];
-
-  const runPass = async ({
-    stage,
-    canvas,
-    psm,
-    source,
-    region,
-    rotate = 0,
-    whitelist = '',
-  }) => {
-    const range = PHASE_RANGES[stage] || PHASE_RANGES.parsing;
-    activePhase = { stage, start: range[0], end: range[1] };
-    emitProgress(stage, range[0], 'recognising');
-
-    const parameters = {
-      tessedit_pageseg_mode: String(psm),
-      preserve_interword_spaces: '1',
-      user_defined_dpi: '300',
-    };
-    if (whitelist) {
-      parameters.tessedit_char_whitelist = whitelist;
+    try {
+      run.worker = await getWorker();
+    } catch (error) {
+      throw new Error('ocr-unavailable', { cause: error });
     }
 
-    try {
-      await worker.setParameters(parameters);
-      const result = await worker.recognize(
-        canvas,
-        {},
-        { text: true, blocks: true },
-      );
-      const data = result?.data || {};
-      const lines = collectLines(data, { source, canvas, region, rotate });
+    emitProgress(run, 'preparing', PHASE_RANGES.preparing[1], 'image ready');
+    setStage(run, 'analyzing');
+    emitProgress(run, 'analyzing', PHASE_RANGES.analyzing[0], 'analysing layout');
 
-      collected.push(...lines);
-      if (data.text) rawParts.push(String(data.text));
+    const sourceLongSide = Math.max(
+      source.naturalWidth || source.width || 1,
+      source.naturalHeight || source.height || 1,
+    );
 
-      emitProgress(stage, range[1], 'done');
-      return lines;
-    } finally {
+    const runPass = async ({
+      stage,
+      canvas,
+      psm,
+      origin,
+      region,
+      rotate = 0,
+      whitelist = '',
+    }) => {
+      assertNotAborted(run);
+      setStage(run, stage);
+
+      const range = PHASE_RANGES[stage] || PHASE_RANGES.parsing;
+      emitProgress(run, stage, range[0], 'recognising');
+
+      const parameters = {
+        tessedit_pageseg_mode: String(psm),
+        preserve_interword_spaces: '1',
+        user_defined_dpi: '300',
+      };
       if (whitelist) {
-        try {
-          await worker.setParameters({ tessedit_char_whitelist: '' });
-        } catch {
-          /* The next pass will overwrite the parameter anyway. */
+        parameters.tessedit_char_whitelist = whitelist;
+      }
+
+      const passStarted = now();
+
+      try {
+        await run.worker.setParameters(parameters);
+        const result = await run.worker.recognize(
+          canvas,
+          {},
+          { text: true, blocks: true },
+        );
+        const data = result?.data || {};
+        const lines = collectLines(data, { source: origin, canvas, region, rotate });
+
+        run.collected.push(...lines);
+        if (data.text) run.raw.push(String(data.text));
+
+        emitProgress(run, stage, range[1], 'done');
+
+        if (isOcrDebugEnabled()) {
+          rememberPass({
+            stage,
+            region,
+            rotate,
+            canvas,
+            text: data.text,
+            ms: now() - passStarted,
+          });
+        }
+
+        return lines;
+      } catch (error) {
+        if (isAbortError(error)) throw error;
+        /* One failed pass must not throw away what the others already found. */
+        console.warn(`[OCR] pass "${stage}" failed:`, error);
+        emitProgress(run, stage, range[1], 'failed');
+        return [];
+      } finally {
+        if (whitelist) {
+          try {
+            await run.worker.setParameters({ tessedit_char_whitelist: '' });
+          } catch {
+            /* The next pass overwrites the parameter anyway. */
+          }
+        }
+      }
+    };
+
+    /* 2. Full card: geometry, not accuracy. No upscale, no enhancement. */
+    const fullCanvas = prepareRegion(source, FULL_REGION, {
+      ...PREP.full,
+      targetLongSide: Math.min(PREP.full.targetLongSide, sourceLongSide),
+    });
+    const fullLines = await runPass({
+      stage: 'full',
+      canvas: fullCanvas,
+      psm: '11',
+      origin: 'full',
+      region: FULL_REGION,
+    });
+
+    const candidates = layoutCandidates(fullLines);
+
+    assertNotAborted(run);
+
+    /* 3. Model name: below the blister. Tight prior first, wide fallback after. */
+    for (let index = 0; index < candidates.bottom.length; index += 1) {
+      const region = candidates.bottom[index];
+      await runPass({
+        stage: 'bottom',
+        canvas: prepareRegion(source, region, PREP.bottom),
+        psm: index === 0 ? '7' : '6',
+        origin: 'bottom',
+        region,
+      });
+      if (hasStrongCarName(run.collected)) break;
+    }
+
+    /* 4. Collection strip: vertical, always rotated. */
+    let collectionFound = false;
+    for (const rotation of [90, 270]) {
+      if (collectionFound) break;
+
+      for (let index = 0; index < candidates.side.length; index += 1) {
+        const region = candidates.side[index];
+        await runPass({
+          stage: 'side',
+          canvas: prepareRegion(source, region, { ...PREP.side, rotate: rotation }),
+          psm: index < 2 ? '7' : '11',
+          origin: 'side',
+          region,
+          rotate: rotation,
+        });
+
+        if (hasCollectionName(run.collected)) {
+          collectionFound = true;
+          break;
         }
       }
     }
-  };
 
-  /* 1. Full card: finds every reasonably sized word and its coordinates. */
-  const fullCanvas = renderRegion(
-    image,
-    { x: 0, y: 0, w: 1, h: 1 },
-    { targetWidth: 1500 },
+    /* 5. Collection number: only when the previous passes missed it. */
+    if (!extractCollectionNumber(toLines(dedupeLines(run.collected)))) {
+      for (const region of candidates.number) {
+        await runPass({
+          stage: 'numbers',
+          canvas: prepareRegion(source, region, PREP.number),
+          psm: '7',
+          origin: 'number',
+          region,
+          whitelist: '0123456789/|:.-',
+        });
+        if (extractCollectionNumber(toLines(dedupeLines(run.collected)))) break;
+      }
+    }
+
+    /* 6. Parse everything once, with the focused passes included. */
+    setStage(run, 'parsing');
+    emitProgress(run, 'parsing', PHASE_RANGES.parsing[0], 'parsing');
+
+    const mergedLines = dedupeLines(run.collected);
+    const name = extractCarName(mergedLines);
+    const collectionName = extractCollectionName(mergedLines, {
+      exclude: name ? [name] : [],
+    });
+    const collectionNumber = extractCollectionNumber(mergedLines);
+    const description = buildDescription({ collectionName, collectionNumber });
+    const rawText = dedupeRawText(run.raw);
+
+    emitProgress(run, 'parsing', 1, 'done');
+
+    const result = {
+      name,
+      description,
+      collectionName,
+      collectionNumber,
+      rawText,
+      lines: mergedLines.map((line) => ({
+        text: line.text,
+        source: line.source,
+        confidence: line.confidence,
+        relativeX: line.relativeX,
+        relativeY: line.relativeY,
+      })),
+    };
+
+    cacheSet(cacheKey, result);
+    return result;
+  } finally {
+    if (activeRun === run) activeRun = null;
+    run.worker = null;
+  }
+}
+
+/** Accepts canvas, Image and ImageBitmap as long as it has a usable size. */
+function normalizeSource(candidate) {
+  if (!candidate) return null;
+  const width = candidate.naturalWidth || candidate.width || 0;
+  const height = candidate.naturalHeight || candidate.height || 0;
+  return width > 0 && height > 0 ? candidate : null;
+}
+
+function hasStrongCarName(lines) {
+  const { best } = rankCarNames(toLines(lines));
+  return Boolean(best && best.score >= 4);
+}
+
+function hasCollectionName(lines) {
+  const entries = toLines(lines);
+  const carName = extractCarName(entries);
+  return Boolean(
+    extractCollectionName(entries, { exclude: carName ? [carName] : [] }),
   );
-  const fullLines = await runPass({
-    stage: 'full',
-    canvas: fullCanvas,
-    psm: '11',
-    source: 'full',
-    region: { x: 0, y: 0, w: 1, h: 1 },
-  });
-
-  /* 2. Use the detected boxes to decide where to look next. */
-  const layout = refineLayout(fullLines);
-
-  /* 3. Bottom band: hot-wheels model name lives below the blister. */
-  const bottomCanvas = renderRegion(image, layout.bottom, {
-    targetWidth: 1400,
-  });
-  await runPass({
-    stage: 'bottom',
-    canvas: bottomCanvas,
-    psm: '6',
-    source: 'bottom',
-    region: layout.bottom,
-  });
-
-  /* 4. Right-side band, rotated. Collection names are usually vertical. */
-  const sideClockwise = renderRegion(image, layout.side, {
-    targetWidth: 1400,
-    rotate: 90,
-  });
-  await runPass({
-    stage: 'side',
-    canvas: sideClockwise,
-    psm: '6',
-    source: 'side',
-    region: layout.side,
-    rotate: 90,
-  });
-
-  let mergedLines = dedupeLines(collected);
-  let collectionName = extractCollectionName(mergedLines, {
-    exclude: [extractCarName(mergedLines)],
-  });
-
-  /* Some cards print the strip in the opposite direction. */
-  if (!collectionName) {
-    const sideCounterClockwise = renderRegion(image, layout.side, {
-      targetWidth: 1400,
-      rotate: -90,
-    });
-    await runPass({
-      stage: 'side',
-      canvas: sideCounterClockwise,
-      psm: '6',
-      source: 'side',
-      region: layout.side,
-      rotate: -90,
-    });
-    mergedLines = dedupeLines(collected);
-    collectionName = extractCollectionName(mergedLines, {
-      exclude: [extractCarName(mergedLines)],
-    });
-  }
-
-  /* 5. Number-only pass when the collection number was missed. */
-  if (!extractCollectionNumber(mergedLines)) {
-    const numberCanvas = renderRegion(image, layout.number, {
-      targetWidth: 1200,
-    });
-    await runPass({
-      stage: 'numbers',
-      canvas: numberCanvas,
-      psm: '11',
-      source: 'number',
-      region: layout.number,
-      whitelist: '0123456789/|:.-',
-    });
-    mergedLines = dedupeLines(collected);
-  }
-
-  /* 6. Parse everything once more with the focused passes included. */
-  activePhase = {
-    stage: 'parsing',
-    start: PHASE_RANGES.parsing[0],
-    end: PHASE_RANGES.parsing[1],
-  };
-  emitProgress('parsing', PHASE_RANGES.parsing[0], 'parsing');
-
-  const name = extractCarName(mergedLines);
-  const collectionNumber = extractCollectionNumber(mergedLines);
-  const description = buildDescription({
-    collectionName,
-    collectionNumber,
-  });
-  const rawText = dedupeRawText(rawParts);
-
-  emitProgress('parsing', PHASE_RANGES.parsing[1], 'done');
-
-  const result = {
-    name,
-    description,
-    collectionName,
-    collectionNumber,
-    rawText,
-    lines: mergedLines.map((line) => ({
-      text: line.text,
-      source: line.source,
-      confidence: line.confidence,
-      relativeX: line.relativeX,
-      relativeY: line.relativeY,
-    })),
-  };
-
-  // Cache the result
-  cacheSet(cacheHash, result);
-
-  return result;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -652,8 +820,25 @@ export async function scanHotWheelsCard(imageBase64, options = {}) {
  * @returns {string}
  */
 export function extractCarName(lines) {
-  const entries = toLines(lines);
-  if (!entries.length) return '';
+  const { best, fallback } = rankCarNames(toLines(lines));
+
+  let result = '';
+  if (best && best.score >= 4) {
+    result = best.text;
+  } else if (fallback) {
+    result = fallback;
+  }
+
+  return applyHotWheelsCorrections(result);
+}
+
+/**
+ * Scores every plausible line and returns the best candidate plus the first
+ * fallback. Shared with the scanner, which uses the score to decide whether
+ * the name is already strong enough to skip the remaining bottom passes.
+ */
+function rankCarNames(entries) {
+  if (!entries.length) return { best: null, fallback: '' };
 
   const ordered = entries
     .map((line, index) => ({ line, index }))
@@ -683,17 +868,7 @@ export function extractCarName(lines) {
     }
   }
 
-  let result = '';
-  if (best && best.score >= 4) {
-    result = best.text;
-  } else if (fallback) {
-    result = fallback;
-  }
-
-  // Apply Hot Wheels specific corrections
-  result = applyHotWheelsCorrections(result);
-
-  return result;
+  return { best, fallback };
 }
 
 /**
@@ -823,6 +998,10 @@ export function extractCollectionName(lines, options = {}) {
 function findCollectionNumberDetail(entries) {
   if (!entries.length) return null;
 
+  /* "SCALE" is often printed on a different line than "1/64", so the test has
+   * to look at the whole page, not only at the matching line. */
+  const scaleOnPage = entries.some((line) => SCALE_WORDS.test(line.text));
+
   const patterns = [
     {
       regex:
@@ -853,7 +1032,7 @@ function findCollectionNumberDetail(entries) {
           const total = Number(match[2]);
           const value = `${current}/${total}`;
 
-          if (!isValidCollectionPair(current, total, line.text)) continue;
+          if (!isValidCollectionPair(current, total, line.text, scaleOnPage)) continue;
 
           let score = pattern.weight;
           score += (line.confidence / 100) * 2;
@@ -880,22 +1059,26 @@ function findCollectionNumberDetail(entries) {
   return best;
 }
 
-function isValidCollectionPair(current, total, lineText) {
+function isValidCollectionPair(current, total, lineText, scaleOnPage = false) {
   if (!Number.isFinite(current) || !Number.isFinite(total)) return false;
   if (current < 1 || current > 500) return false;
   if (total < 2 || total > 500) return false;
   if (current > total) return false;
 
   const text = String(lineText || '').toUpperCase();
+  const mentionsCollection = COLLECTION_WORDS.test(text);
 
-  /* 1/64, 1/43 and 1/87 are scales, not collection numbers. */
-  if (current === 1 && [43, 64, 87].includes(total)) {
-    if (!/\b(?:COLLECTION|COLE[CÇ][AÃ]O|S[EÉ]RIE|SERIES)\b/.test(text)) {
-      return false;
-    }
+  /* 1/64, 1/43, 1/24, 1/18... are scales, not collection numbers. The list is
+   * the only way to tell 1/24 (scale) from 1/24 (first of 24 cars), so the
+   * pairing is rejected unless the line explicitly talks about a collection. */
+  if (current === 1 && SCALE_TOTALS.has(total) && !mentionsCollection) {
+    return false;
   }
 
-  if (/\b(?:SCALE|ÉCHELLE|ESCALA)\b/.test(text)) return false;
+  if (SCALE_WORDS.test(text)) return false;
+
+  /* Same rejection, now with page context. */
+  if (scaleOnPage && !mentionsCollection) return false;
 
   /* Reject year ranges such as 2023/2024. */
   if (current >= 1900 && total >= 1900) return false;
@@ -1088,7 +1271,7 @@ function cleanCarName(text) {
     .replace(/^[Il]([0-9]{1,3})\b/, (_, digits) => `1${digits}`)
     .replace(/[''']/g, "'");
 
-  return value.slice(0, 120);
+  return value.slice(0, 48);
 }
 
 function cleanCollectionName(text) {
@@ -1224,22 +1407,35 @@ function fixDigitLookalikes(text) {
 function collectLines(data, { source, canvas, region, rotate = 0 }) {
   const width = Math.max(1, canvas.width);
   const height = Math.max(1, canvas.height);
+  const rotation = normalizeDegrees(rotate);
   const lines = [];
 
+  /*
+   * Maps a point of the canvas that went to Tesseract back to normalised card
+   * coordinates. Turning the canvas clockwise by 90 degrees maps (u, v) to
+   * (1 - v, u), so the inverse is u = y/H' and v = 1 - x/W'. The previous
+   * version used x for both axes and dropped the sign, which put the strip
+   * boxes on the wrong side of the card.
+   */
   const mapPoint = (x, y) => {
-    if (rotate) {
-      /* Rotated strip: the rotated x-axis maps back to the original y-axis. */
-      const along = rotate > 0 ? x / width : 1 - x / width;
-      return {
-        x: region.x + (y / height) * region.w,
-        y: region.y + along * region.h,
-      };
+    const nx = clamp(x / width, 0, 1);
+    const ny = clamp(y / height, 0, 1);
+
+    let ax = nx;
+    let ay = ny;
+
+    if (rotation === 90) {
+      ax = ny;
+      ay = 1 - nx;
+    } else if (rotation === 180) {
+      ax = 1 - nx;
+      ay = 1 - ny;
+    } else if (rotation === 270) {
+      ax = 1 - ny;
+      ay = nx;
     }
 
-    return {
-      x: region.x + (x / width) * region.w,
-      y: region.y + (y / height) * region.h,
-    };
+    return { x: region.x + ax * region.w, y: region.y + ay * region.h };
   };
 
   const pushLine = (rawText, confidence, bbox) => {
@@ -1286,22 +1482,30 @@ function collectLines(data, { source, canvas, region, rotate = 0 }) {
     }
   }
 
+  /*
+   * No blocks: keep the text but drop the geometry. Inventing evenly spaced
+   * boxes poisoned the layout — a fake box in the middle of the card became a
+   * "detected" band, and the focused pass then read plastic instead of text.
+   */
   if (!lines.length && data?.text) {
     const textLines = String(data.text)
       .split(/\r?\n/)
       .map((text) => normalizeLine(text))
       .filter(Boolean);
 
-    textLines.forEach((text, index) => {
-      const y0 = (index / Math.max(1, textLines.length)) * height;
-      const y1 = ((index + 1) / Math.max(1, textLines.length)) * height;
-      pushLine(text, data.confidence, {
-        x0: 0,
-        y0,
-        x1: width,
-        y1,
+    for (const text of textLines) {
+      lines.push({
+        text,
+        confidence: clamp(Number(data.confidence) || 0, 0, 100),
+        source,
+        vertical: Boolean(rotation) || source === 'side',
+        bbox: null,
+        relativeX: null,
+        relativeY: null,
+        relativeWidth: null,
+        relativeHeight: null,
       });
-    });
+    }
   }
 
   return lines;
@@ -1311,15 +1515,17 @@ function dedupeLines(lines) {
   const best = new Map();
 
   for (const line of lines) {
-    const key = normalizeKey(line.text);
-    if (!key) continue;
+    const normalized = normalizeKey(line.text);
+    if (!normalized) continue;
 
-    const score =
-      line.confidence +
-      (line.source === 'bottom' ? 15 : 0) +
-      (line.source === 'side' ? 20 : 0) +
-      (line.source === 'number' ? 10 : 0) +
-      Math.min(8, line.text.length / 5);
+    /*
+     * Key by (source, text) instead of text alone. The same collection strip
+     * can be read by the wide pass and by the focused pass, and keeping a
+     * single copy used to decide the winner with a fixed source bonus before
+     * any scoring. Now both survive and the parsers choose.
+     */
+    const key = `${line.source}|${normalized}`;
+    const score = line.confidence + Math.min(8, line.text.length / 5);
 
     const existing = best.get(key);
     if (!existing || score > existing.score) {
@@ -1350,39 +1556,44 @@ function dedupeRawText(parts) {
   return result.join('\n');
 }
 
-function refineLayout(fullLines) {
-  const bottomLines = fullLines.filter(
-    (line) =>
-      line.relativeY != null &&
-      line.relativeY >= 0.42 &&
-      (line.relativeX == null || line.relativeX < 0.74) &&
-      isRegionText(line.text),
+/**
+ * Turns the boxes found by the full pass into candidate regions, always
+ * followed by the layout priors. The detected box is a hint, never a
+ * requirement: Tesseract with `eng` and PSM 11 usually does not return rotated
+ * text, and a missing box used to mean "read the wrong band".
+ */
+function layoutCandidates(fullLines) {
+  const detectedBottom = deriveRegion(
+    fullLines.filter(
+      (line) =>
+        line.relativeY != null &&
+        line.relativeY >= 0.42 &&
+        (line.relativeX == null || line.relativeX < 0.74) &&
+        isRegionText(line.text),
+    ),
+    { minWidth: 0.5, minHeight: 0.08, margin: 0.04 },
   );
 
-  const sideLines = fullLines.filter(
-    (line) =>
-      line.relativeX != null &&
-      line.relativeX >= 0.58 &&
-      isRegionText(line.text),
+  const detectedSide = deriveRegion(
+    fullLines.filter(
+      (line) =>
+        line.relativeX != null &&
+        line.relativeX >= 0.58 &&
+        isRegionText(line.text),
+    ),
+    { minWidth: 0.16, minHeight: 0.25, margin: 0.03 },
   );
 
   return {
-    bottom: unionRegion(bottomLines, FALLBACK_REGIONS.bottom, {
-      minWidth: 0.5,
-      minHeight: 0.08,
-      margin: 0.04,
-    }),
-    side: unionRegion(sideLines, FALLBACK_REGIONS.side, {
-      minWidth: 0.16,
-      minHeight: 0.25,
-      margin: 0.03,
-    }),
-    number: { ...FALLBACK_REGIONS.number },
+    bottom: uniqueRegions([detectedBottom, ...PRIORS.bottom]),
+    side: uniqueRegions([detectedSide, ...PRIORS.side]),
+    number: [...PRIORS.number],
   };
 }
 
-function unionRegion(lines, fallback, { minWidth, minHeight, margin }) {
-  if (!lines.length) return { ...fallback };
+/** Union of the given lines as a normalised region, or null when empty. */
+function deriveRegion(lines, { minWidth, minHeight, margin }) {
+  if (!lines.length) return null;
 
   let x0 = Math.min(...lines.map((line) => line.relativeX));
   let y0 = Math.min(...lines.map((line) => line.relativeY));
@@ -1427,9 +1638,29 @@ function unionRegion(lines, fallback, { minWidth, minHeight, margin }) {
   x1 = clamp(x1, 0.02, 1);
   y1 = clamp(y1, 0.02, 1);
 
-  if (x1 - x0 < 0.08 || y1 - y0 < 0.04) return { ...fallback };
+  if (x1 - x0 < 0.08 || y1 - y0 < 0.04) return null;
 
   return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+
+/** Drops nulls and regions that repeat a previous one (1 % tolerance). */
+function uniqueRegions(regions) {
+  const seen = new Set();
+  const result = [];
+
+  for (const region of regions) {
+    if (!region) continue;
+
+    const key = [region.x, region.y, region.w, region.h]
+      .map((value) => Math.round(value * 100))
+      .join(':');
+
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(region);
+  }
+
+  return result;
 }
 
 function isRegionText(text) {
@@ -1443,6 +1674,11 @@ function isRegionText(text) {
 /* Image preparation                                                          */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * Decodes a base64 payload into an image. The stored documents are always
+ * JPEG, but the MIME label is sniffed from the payload header so a PNG or
+ * WebP coming from another writer is not mislabelled as `image/jpeg`.
+ */
 function loadImage(imageBase64) {
   return new Promise((resolve, reject) => {
     const source = String(imageBase64 || '').trim();
@@ -1455,171 +1691,376 @@ function loadImage(imageBase64) {
     image.decoding = 'async';
     image.onload = () => resolve(image);
     image.onerror = () => reject(new Error('ocr-image-decode'));
-    image.src = source.startsWith('data:')
+    image.src = /^data:image\//i.test(source)
       ? source
-      : `data:image/jpeg;base64,${source}`;
+      : `data:${sniffMime(source)};base64,${source}`;
   });
 }
 
-function renderRegion(image, region, options = {}) {
-  const imageWidth = image.naturalWidth || image.width;
-  const imageHeight = image.naturalHeight || image.height;
-
-  const sx = clamp(region.x, 0, 1) * imageWidth;
-  const sy = clamp(region.y, 0, 1) * imageHeight;
-  const sw = clamp(region.w, 0.01, 1) * imageWidth;
-  const sh = clamp(region.h, 0.01, 1) * imageHeight;
-
-  const targetWidth = clamp(Number(options.targetWidth) || 1400, 300, 2000);
-  const rotate = Number(options.rotate) || 0;
-
-  if (rotate) {
-    /*
-     * The rotated width is the most useful dimension for Tesseract, so the
-     * pre-rotation height is targetWidth and the pre-rotation width follows
-     * the original aspect ratio.
-     */
-    const preHeight = targetWidth;
-    const preWidth = clamp(
-      Math.round(targetWidth * (sw / sh)),
-      240,
-      2400,
-    );
-
-    const temp = makeCanvas(preWidth, preHeight);
-    const tempCtx = temp.getContext('2d', { willReadFrequently: true });
-    tempCtx.imageSmoothingEnabled = true;
-    tempCtx.imageSmoothingQuality = 'high';
-    tempCtx.drawImage(image, sx, sy, sw, sh, 0, 0, preWidth, preHeight);
-
-    enhanceCanvas(temp);
-    return rotateCanvas(temp, rotate);
-  }
-
-  const outputWidth = targetWidth;
-  const outputHeight = clamp(
-    Math.round(targetWidth * (sh / sw)),
-    80,
-    3200,
-  );
-
-  const canvas = makeCanvas(outputWidth, outputHeight);
-  const context = canvas.getContext('2d', { willReadFrequently: true });
-  context.imageSmoothingEnabled = true;
-  context.imageSmoothingQuality = 'high';
-  context.drawImage(image, sx, sy, sw, sh, 0, 0, outputWidth, outputHeight);
-
-  enhanceCanvas(canvas);
-  return canvas;
+/** Reads the magic prefix of a base64 payload. Falls back to JPEG. */
+function sniffMime(base64) {
+  if (base64.startsWith('iVBOR')) return 'image/png';
+  if (base64.startsWith('UklGR')) return 'image/webp';
+  return 'image/jpeg';
 }
 
-function makeCanvas(width, height) {
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, Math.round(width));
-  canvas.height = Math.max(1, Math.round(height));
-  return canvas;
-}
+/** Unsharp mask is gone: `prepareRegion` owns the whole pixel pipeline. */
 
-function rotateCanvas(source, degrees) {
-  const normalized = ((degrees % 360) + 360) % 360;
-  if (normalized === 0) return source;
-
-  const swap = normalized === 90 || normalized === 270;
-  const canvas = makeCanvas(
-    swap ? source.height : source.width,
-    swap ? source.width : source.height,
-  );
-  const context = canvas.getContext('2d');
-
-  context.translate(canvas.width / 2, canvas.height / 2);
-  context.rotate((normalized * Math.PI) / 180);
-  context.drawImage(source, -source.width / 2, -source.height / 2);
-
-  return canvas;
-}
-
-/**
- * Grayscale + contrast stretch + light unsharp mask. Tesseract does its own
- * binarization, so keeping a clean grayscale image is safer than hard
- * thresholding coloured packaging.
- */
-function enhanceCanvas(canvas) {
-  const context = canvas.getContext('2d', { willReadFrequently: true });
-  const width = canvas.width;
-  const height = canvas.height;
-  const imageData = context.getImageData(0, 0, width, height);
-  const data = imageData.data;
-  const pixelCount = width * height;
-
-  const luma = new Uint8ClampedArray(pixelCount);
-  const histogram = new Uint32Array(256);
-
-  for (let i = 0, p = 0; i < pixelCount; i += 1, p += 4) {
-    const value = (data[p] * 0.299 + data[p + 1] * 0.587 + data[p + 2] * 0.114) | 0;
-    luma[i] = value;
-    histogram[value] += 1;
-  }
-
-  const low = percentile(histogram, pixelCount, 0.02);
-  const high = percentile(histogram, pixelCount, 0.98);
-  const range = Math.max(1, high - low);
-
-  const lut = new Uint8ClampedArray(256);
-  for (let value = 0; value < 256; value += 1) {
-    let normalized = clamp((value - low) / range, 0, 1);
-    normalized =
-      normalized < 0.5
-        ? 0.5 * Math.pow(2 * normalized, 1.1)
-        : 1 - 0.5 * Math.pow(2 * (1 - normalized), 1.1);
-    lut[value] = Math.round(normalized * 255);
-  }
-
-  const sharpened = new Uint8ClampedArray(pixelCount);
-
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const index = y * width + x;
-      const value = lut[luma[index]];
-
-      if (x === 0 || y === 0 || x === width - 1 || y === height - 1) {
-        sharpened[index] = value;
-        continue;
-      }
-
-      const blur =
-        (lut[luma[index - 1]] +
-          lut[luma[index + 1]] +
-          lut[luma[index - width]] +
-          lut[luma[index + width]]) /
-        4;
-
-      sharpened[index] = clamp(value + 0.55 * (value - blur), 0, 255);
-    }
-  }
-
-  for (let i = 0, p = 0; i < pixelCount; i += 1, p += 4) {
-    const value = sharpened[i];
-    data[p] = value;
-    data[p + 1] = value;
-    data[p + 2] = value;
-    data[p + 3] = 255;
-  }
-
-  context.putImageData(imageData, 0, 0);
-}
-
-function percentile(histogram, total, fraction) {
-  const target = Math.max(0, total * fraction);
-  let seen = 0;
-
-  for (let value = 0; value < histogram.length; value += 1) {
-    seen += histogram[value];
-    if (seen >= target) return value;
-  }
-
-  return 255;
+/** 0, 90, 180 or 270 — negatives and out-of-range values are normalised. */
+function normalizeDegrees(value) {
+  const degrees = Math.round((Number(value) || 0) / 90) * 90;
+  return ((degrees % 360) + 360) % 360;
 }
 
 function clamp(value, minimum, maximum) {
   return Math.min(maximum, Math.max(minimum, value));
+}
+
+/* -------------------------------------------------------------------------- */
+/* Automatic scan session (framework agnostic)                                */
+/* -------------------------------------------------------------------------- */
+
+const DEFAULT_TIMERS = {
+  set: (callback, ms) => setTimeout(callback, ms),
+  clear: (id) => clearTimeout(id),
+};
+
+/**
+ * True on metered or very slow connections. The first automatic scan downloads
+ * a few megabytes, so on those connections the button stays the trigger.
+ */
+export function isMeteredConnection() {
+  if (typeof navigator === 'undefined') return false;
+
+  const connection =
+    navigator.connection || navigator.mozConnection || navigator.webkitConnection || {};
+
+  if (connection.saveData) return true;
+  return /(^|-)2g$/.test(String(connection.effectiveType || ''));
+}
+
+/**
+ * Merges a scan result into the current form values.
+ *
+ * Automatic scans never overwrite what the user already typed; the explicit
+ * button does. The returned flags let the caller pick the right message.
+ *
+ * @param {{ name?: string, description?: string }} current
+ * @param {{ name?: string, description?: string }} result
+ * @param {{ overwrite?: boolean }} [options]
+ * @returns {{ name: string, description: string, filledName: boolean,
+ *   filledDescription: boolean, filled: boolean, complete: boolean }}
+ */
+export function mergeScanResult(current, result, { overwrite = false } = {}) {
+  const name = String(result?.name || '').trim();
+  const description = String(result?.description || '').trim();
+  const currentName = String(current?.name || '');
+  const currentDescription = String(current?.description || '');
+
+  const fillName = Boolean(name) && (overwrite || !currentName.trim());
+  const fillDescription =
+    Boolean(description) && (overwrite || !currentDescription.trim());
+
+  return {
+    name: fillName ? name : currentName,
+    description: fillDescription ? description : currentDescription,
+    filledName: fillName,
+    filledDescription: fillDescription,
+    filled: fillName || fillDescription,
+    complete: fillName && fillDescription,
+  };
+}
+
+/**
+ * Orchestrates the scans of one form: scheduling after the crop, cancellation
+ * and the "one scan at a time" rule. It is deliberately framework agnostic so
+ * it can be unit tested without Alpine or a DOM.
+ *
+ * @param {{
+ *   scan?: Function,
+ *   getImage?: () => string,
+ *   getSource?: () => any,
+ *   delay?: number,
+ *   timers?: { set: Function, clear: Function },
+ *   readAuto?: () => boolean,
+ *   writeAuto?: (enabled: boolean) => void,
+ *   isMetered?: () => boolean,
+ *   onChange?: (state: object) => void,
+ *   onProgress?: (event: object) => void,
+ *   onResult?: (result: object, options: { overwrite: boolean }) => void,
+ *   onError?: (error: Error) => void,
+ * }} [options]
+ */
+export function createScanSession(options = {}) {
+  const {
+    scan = (image, scanOptions) => scanHotWheelsCard(image, scanOptions),
+    getImage = () => '',
+    getSource = () => null,
+    delay = AUTO_SCAN_DELAY,
+    timers = DEFAULT_TIMERS,
+    readAuto = loadOcrAuto,
+    writeAuto = saveOcrAuto,
+    isMetered = isMeteredConnection,
+    onChange = () => {},
+    onProgress = () => {},
+    onResult = () => {},
+    onError = () => {},
+  } = options;
+
+  let token = 0;
+  let timer = 0;
+  let controller = null;
+  let current = null;
+  let state = {
+    scanning: false,
+    auto: false,
+    progress: 0,
+    stage: 'library',
+    enabled: readAuto(),
+  };
+
+  const publish = (patch = {}) => {
+    state = { ...state, ...patch };
+    onChange({ ...state });
+  };
+
+  const canAutoScan = () =>
+    state.enabled && Boolean(getImage()) && !isMetered();
+
+  const cancel = () => {
+    token += 1;
+    timers.clear(timer);
+    timer = 0;
+    if (controller) {
+      controller.abort();
+      controller = null;
+    }
+    current = null;
+    if (state.scanning) publish({ scanning: false, auto: false, progress: 0 });
+  };
+
+  const run = (auto) => {
+    const image = getImage();
+    if (!image) return Promise.resolve(null);
+
+    const runToken = ++token;
+    const abortController = new AbortController();
+    controller = abortController;
+
+    publish({ scanning: true, auto, progress: 0, stage: 'library' });
+
+    const job = (async () => {
+      try {
+        const result = await scan(image, {
+          sourceImage: getSource(),
+          signal: abortController.signal,
+          onProgress: (event) => {
+            if (runToken !== token) return;
+            publish({
+              stage: event.stage,
+              progress: Math.round(
+                clamp(Number(event.progress) || 0, 0, 1) * 100,
+              ),
+            });
+            onProgress(event);
+          },
+        });
+
+        if (runToken !== token) return null;
+
+        /* A stale result (route changed, field edited, item saved) is dropped
+         * by the token check above; the caller only gets a live one. */
+        onResult(result, { overwrite: !auto });
+        return result;
+      } catch (error) {
+        if (runToken !== token || isAbortError(error)) return null;
+        onError(error);
+        return null;
+      } finally {
+        if (runToken === token) {
+          controller = null;
+          publish({ scanning: false, auto: false, progress: 0 });
+        }
+        if (current === job) current = null;
+      }
+    })();
+
+    current = job;
+    return job;
+  };
+
+  return {
+    /** Schedules the automatic scan that follows "apply crop". */
+    auto() {
+      if (!canAutoScan()) return;
+
+      timers.clear(timer);
+      timer = timers.set(() => {
+        timer = 0;
+        if (!canAutoScan()) return;
+        cancel();
+        void run(true);
+      }, delay);
+    },
+
+    /** Explicit "scan again": cancels whatever is pending and overwrites. */
+    manual() {
+      cancel();
+      return run(false);
+    },
+
+    cancel,
+
+    setEnabled(value) {
+      const enabled = Boolean(value);
+      writeAuto(enabled);
+      publish({ enabled });
+      if (!enabled) cancel();
+    },
+
+    isEnabled: () => state.enabled,
+    canAutoScan,
+    getState: () => ({ ...state }),
+    whenIdle: () => current || Promise.resolve(null),
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Alpine adapter                                                             */
+/* -------------------------------------------------------------------------- */
+
+/** Per-component scratch space kept out of Alpine's reactive proxy. */
+const OCR_PANELS = new WeakMap();
+
+function translate(component, key) {
+  return typeof component?.t === 'function' ? component.t(key) : key;
+}
+
+function applyScanResultToComponent(component, result, { overwrite = false } = {}) {
+  const state = component.ocr || {};
+  const form = component.form || {};
+  const errors = component.formErrors || {};
+
+  const merged = mergeScanResult(form, result, { overwrite });
+
+  if (merged.filledName) {
+    form.name = merged.name;
+    delete errors.name;
+  }
+
+  if (merged.filledDescription) {
+    form.description = merged.description;
+    delete errors.description;
+  }
+
+  state.result = result;
+
+  if (merged.filled) {
+    const message = translate(component, merged.complete ? 'ocrSuccess' : 'ocrPartial');
+    if (typeof component.showToast === 'function') component.showToast(message);
+    return merged;
+  }
+
+  state.error = translate(component, 'ocrEmpty');
+  return merged;
+}
+
+/**
+ * Wires the OCR panel into an Alpine component with a single call.
+ *
+ * It expects the component to expose `form` (with `name`, `description` and
+ * `imageBase64`), `ocr` (the panel state), `formErrors`, `t()` and, ideally,
+ * `showToast()`. Everything else is internal:
+ *
+ * ```js
+ * import { attachOcrPanel } from './app.js';
+ *
+ * init() {
+ *   attachOcrPanel(this);          // cria a sessão e os métodos do painel
+ * },
+ * // ao aplicar o recorte (antes de dispose()):
+ * this.ocrOnCropApplied(this.cropper.session.toOcrCanvas()),
+ * // na saída do formulário:
+ * this.ocrCleanup(),
+ * ```
+ *
+ * Added methods: `scanPackaging()`, `cancelOcrScan()`, `setOcrAuto(value)`,
+ * `ocrOnCropApplied(canvas)` and `ocrCleanup()`.
+ *
+ * @param {object} component Alpine component instance (`this`).
+ * @param {{ scan?: Function, isMetered?: () => boolean, readAuto?: () => boolean,
+ *   writeAuto?: (enabled: boolean) => void }} [options]
+ * @returns {object|null} The scan session, or null when already attached.
+ */
+export function attachOcrPanel(component, options = {}) {
+  if (!component || typeof component !== 'object') return null;
+  if (OCR_PANELS.has(component)) return OCR_PANELS.get(component).session;
+
+  if (!component.ocr) {
+    component.ocr = {
+      scanning: false,
+      auto: false,
+      progress: 0,
+      stage: 'library',
+      result: null,
+      error: '',
+      autoEnabled: true,
+    };
+  }
+
+  const sources = { current: null };
+
+  const session = createScanSession({
+    scan: options.scan,
+    isMetered: options.isMetered,
+    readAuto: options.readAuto,
+    writeAuto: options.writeAuto,
+    delay: options.delay,
+    timers: options.timers,
+    getImage: () => component.form?.imageBase64 || '',
+    getSource: () => sources.current,
+    onChange: (state) => {
+      const panel = component.ocr;
+      panel.scanning = state.scanning;
+      panel.auto = state.auto;
+      panel.progress = state.progress;
+      panel.stage = state.stage;
+      panel.autoEnabled = state.enabled;
+    },
+    onResult: (result, meta) => applyScanResultToComponent(component, result, meta),
+    onError: () => {
+      component.ocr.scanning = false;
+      component.ocr.error = translate(component, 'ocrFailed');
+    },
+  });
+
+  component.scanPackaging = () => {
+    component.ocr.error = '';
+    component.ocr.result = null;
+    void session.manual();
+  };
+
+  component.cancelOcrScan = () => session.cancel();
+
+  component.setOcrAuto = (value) => session.setEnabled(value);
+
+  /** Call right after "apply crop", with the `toOcrCanvas()` result. */
+  component.ocrOnCropApplied = (canvas) => {
+    sources.current = canvas || null;
+    session.auto();
+  };
+
+  /** Call when leaving the form, saving, cancelling or removing the image. */
+  component.ocrCleanup = () => {
+    session.cancel();
+    sources.current = null;
+  };
+
+  OCR_PANELS.set(component, { session, sources });
+  return session;
+}
+
+/** Test/diagnostic hook: exposes the live session of an attached component. */
+export function getOcrPanelSession(component) {
+  return OCR_PANELS.get(component)?.session || null;
 }

@@ -205,6 +205,84 @@ async function checkCss(reporter) {
 
   const bytes = Buffer.byteLength(css);
   reporter.info(`css/styles.css: ${formatBytes(bytes)}.`);
+
+  await checkTailwindOutput(reporter);
+}
+
+/**
+ * `css/tailwind.css` is generated from index.html and js/*.js. If either of
+ * those is newer than the stylesheet, a class added recently is probably
+ * missing from the build — warn instead of failing, since a checkout can
+ * reorder timestamps.
+ */
+async function checkTailwindOutput(reporter) {
+  const output = path.join(CSS_DIR, 'tailwind.css');
+
+  if (!(await exists(output))) {
+    reporter.error('css/tailwind.css ausente. Rode "npm run css".');
+    return;
+  }
+
+  const sources = [INDEX_FILE];
+  for (const name of await fs.readdir(JS_DIR)) {
+    if (name.endsWith('.js')) sources.push(path.join(JS_DIR, name));
+  }
+
+  const outputStat = await fs.stat(output);
+  const newer = [];
+
+  for (const source of sources) {
+    const stat = await fs.stat(source);
+    if (stat.mtimeMs > outputStat.mtimeMs) newer.push(path.basename(source));
+  }
+
+  if (newer.length) {
+    reporter.warn(
+      `css/tailwind.css pode estar desatualizado (mais antigo que ${shortList(newer)}). Rode "npm run css".`,
+    );
+  } else {
+    reporter.ok(`css/tailwind.css compilado e atualizado (${formatBytes(outputStat.size)}).`);
+  }
+}
+
+const exportCache = new Map();
+
+/** Resolves a relative import to an existing file, or null. */
+async function resolveLocalFile(fromFile, specifier) {
+  const target = path.resolve(path.dirname(fromFile), specifier);
+  const candidates = [target, `${target}.js`, `${target}.mjs`, path.join(target, 'index.js')];
+
+  for (const candidate of candidates) {
+    if (await exists(candidate)) return candidate;
+  }
+
+  return null;
+}
+
+/** Names a module exports: declarations, `export { ... }` and default. */
+async function namedExports(file) {
+  if (exportCache.has(file)) return exportCache.get(file);
+
+  const source = await readText(file);
+  const names = new Set();
+
+  for (const match of source.matchAll(
+    /export\s+(?:async\s+)?(?:function|const|let|var|class)\s+([A-Za-z_$][\w$]*)/g,
+  )) {
+    names.add(match[1]);
+  }
+
+  for (const match of source.matchAll(/export\s*\{([^}]*)\}/g)) {
+    for (const raw of match[1].split(',')) {
+      const exported = raw.trim().split(/\s+as\s+/).pop();
+      if (exported) names.add(exported.trim());
+    }
+  }
+
+  if (/export\s+default\b/.test(source)) names.add('default');
+
+  exportCache.set(file, names);
+  return names;
 }
 
 async function checkJavaScript(reporter) {
@@ -215,6 +293,7 @@ async function checkJavaScript(reporter) {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'wheels-check-'));
   const invalid = [];
   const unresolved = [];
+  const missingExports = [];
   try {
     for (const name of files) {
       const file = path.join(JS_DIR, name);
@@ -239,6 +318,25 @@ async function checkJavaScript(reporter) {
         }
         if (!found) unresolved.push(`js/${name} -> ${specifier}`);
       }
+
+      /*
+       * Named imports must exist in the target module. A browser reports this
+       * as "The requested module './x.js' does not provide an export named
+       * ...", which is indistinguishable from a stale cached file — catching
+       * it here keeps that class of bug out of production.
+       */
+      for (const match of source.matchAll(/import\s*\{([^}]+)\}\s*from\s*['"](\.{1,2}\/[^'"]+)['"]/g)) {
+        const target = await resolveLocalFile(file, match[2]);
+        if (!target) continue;
+        const available = await namedExports(target);
+        for (const raw of match[1].split(',')) {
+          const imported = raw.trim().split(/\s+as\s+/)[0].trim();
+          if (!imported) continue;
+          if (!available.has(imported)) {
+            missingExports.push(`js/${name} importa "${imported}" de ${match[2]}, que nao exporta esse nome`);
+          }
+        }
+      }
     }
   } finally {
     await fs.rm(temp, { recursive: true, force: true });
@@ -250,6 +348,8 @@ async function checkJavaScript(reporter) {
   }
   if (unresolved.length) reporter.error(`Imports locais nao encontrados: ${shortList(unresolved)}.`);
   else reporter.ok('Todos os imports locais foram encontrados.');
+  if (missingExports.length) reporter.error(`Export nomeado ausente: ${shortList(missingExports)}.`);
+  else reporter.ok('Todos os imports nomeados existem nos modulos de destino.');
 
   const config = await readText(CONFIG_FILE);
   if (/export\s+function\s+isFirebaseConfigured\s*\(/.test(config)) {

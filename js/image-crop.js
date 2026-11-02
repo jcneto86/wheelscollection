@@ -1,5 +1,17 @@
 import { LIMITS } from './firebase-config.js';
 
+/** Background used for the letterbox when the crop does not fill the square. */
+const LETTERBOX = '#0f172a';
+
+/** JPEG quality ladder for the stored image. Unchanged on purpose: the saved
+ *  Base64 must stay byte-identical to what the app produced before. */
+const QUALITY_LADDER = [0.82, 0.72, 0.62, 0.5];
+
+/** Square side (px) of the disposable canvas used by the OCR pipeline. */
+const OCR_SIDE = 1600;
+/** Upper bound to stay well inside the canvas memory limits of mobile Safari. */
+const OCR_SIDE_MAX = 2048;
+
 /**
  * Interactive square image cropper.
  *
@@ -43,6 +55,7 @@ export class CropSession {
     this.ctx.imageSmoothingEnabled = true;
     this.ctx.imageSmoothingQuality = 'high';
 
+    this.minZoom = this.fitZoom();
     this.clampOffsets();
     this.draw();
   }
@@ -79,6 +92,20 @@ export class CropSession {
     return this.baseScale * this.zoom;
   }
 
+  /**
+   * Zoom that fits the whole image inside the square (contain) instead of
+   * covering it. Zoom 1 is "cover", so the long sides are always cut at 1x;
+   * allowing this value lets the user frame the entire card without changing
+   * the 500 x 500 output contract.
+   */
+  fitZoom() {
+    const fit = Math.min(
+      this.view / this.rotatedWidth,
+      this.view / this.rotatedHeight,
+    );
+    return clamp(fit / this.baseScale, 0.25, 1);
+  }
+
   setZoom(value) {
     const next = Number(value);
     if (!Number.isFinite(next)) return;
@@ -90,6 +117,8 @@ export class CropSession {
 
   rotate(deltaDegrees) {
     this.rotation = (this.rotation + deltaDegrees + 360) % 360;
+    /* Rotating swaps width and height, so the fit zoom changes with it. */
+    this.minZoom = this.fitZoom();
     this.clampOffsets();
     this.draw();
   }
@@ -126,7 +155,7 @@ export class CropSession {
     const height = this.imageHeight * this.scale;
 
     ctx.clearRect(0, 0, this.view, this.view);
-    ctx.fillStyle = '#0f172a';
+    ctx.fillStyle = LETTERBOX;
     ctx.fillRect(0, 0, this.view, this.view);
 
     ctx.save();
@@ -140,11 +169,14 @@ export class CropSession {
   }
 
   /**
-   * Renders the crop at exactly 500 x 500. Tries decreasing JPEG qualities
-   * until the Base64 payload fits comfortably inside the Firestore limit.
+   * Renders the current framing (zoom, pan, rotation) into a square canvas of
+   * `side` pixels, drawn straight from the decoded source image.
+   *
+   * @param {number} side Square side in pixels.
+   * @param {{ background?: string }} [options]
+   * @returns {HTMLCanvasElement}
    */
-  toBase64(maxLength = LIMITS.imageBase64) {
-    const side = LIMITS.imageSide;
+  renderTo(side, { background = LETTERBOX } = {}) {
     const output = document.createElement('canvas');
     output.width = side;
     output.height = side;
@@ -158,15 +190,27 @@ export class CropSession {
     const width = this.imageWidth * this.scale * factor;
     const height = this.imageHeight * this.scale * factor;
 
-    ctx.fillStyle = '#0f172a';
+    ctx.fillStyle = background;
     ctx.fillRect(0, 0, side, side);
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
+    ctx.save();
     ctx.translate(side / 2 + this.offsetX * factor, side / 2 + this.offsetY * factor);
     ctx.rotate((this.rotation * Math.PI) / 180);
     ctx.drawImage(this.image, -width / 2, -height / 2, width, height);
+    ctx.restore();
 
-    for (const quality of [0.82, 0.72, 0.62, 0.5]) {
+    return output;
+  }
+
+  /**
+   * Renders the crop at exactly 500 x 500. Tries decreasing JPEG qualities
+   * until the Base64 payload fits comfortably inside the Firestore limit.
+   */
+  toBase64(maxLength = LIMITS.imageBase64) {
+    const output = this.renderTo(LIMITS.imageSide);
+
+    for (const quality of QUALITY_LADDER) {
       const dataUrl = output.toDataURL('image/jpeg', quality);
       const base64 = dataUrl.split(',')[1] || '';
       if (base64.length > 0 && base64.length <= maxLength) {
@@ -175,6 +219,23 @@ export class CropSession {
     }
 
     throw new Error('image-too-large');
+  }
+
+  /**
+   * High-resolution snapshot with the same framing as `toBase64`, used only by
+   * the OCR pipeline. It is **never persisted**: the stored image stays the
+   * 500 x 500 JPEG. Must be called before `dispose()`.
+   *
+   * @param {{ side?: number }} [options]
+   * @returns {HTMLCanvasElement}
+   */
+  toOcrCanvas({ side = OCR_SIDE } = {}) {
+    const target = clamp(
+      Math.round(Number(side) || OCR_SIDE),
+      LIMITS.imageSide,
+      OCR_SIDE_MAX,
+    );
+    return this.renderTo(target);
   }
 
   dispose() {

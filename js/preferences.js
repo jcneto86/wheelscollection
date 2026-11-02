@@ -8,6 +8,8 @@ export const STORAGE_KEYS = Object.freeze({
   theme: 'wheels.themeMode',
   palette: 'wheels.palette',
   locale: 'wheels.locale',
+  /** '0' disables the automatic packaging scan. Absent means enabled. */
+  ocrAuto: 'wheels.ocrAuto',
 });
 
 export const THEME_MODES = Object.freeze(['light', 'dark', 'system']);
@@ -49,6 +51,23 @@ export function savePreference(key, value) {
   } catch (error) {
     console.warn('[preferences] Could not save preference:', error);
   }
+}
+
+/**
+ * Automatic packaging scan. Enabled by default; only an explicit '0' turns it
+ * off. `localStorage` may be blocked (private mode), so failures fall back to
+ * the default instead of throwing.
+ */
+export function loadOcrAuto() {
+  try {
+    return localStorage.getItem(STORAGE_KEYS.ocrAuto) !== '0';
+  } catch {
+    return true;
+  }
+}
+
+export function saveOcrAuto(enabled) {
+  savePreference(STORAGE_KEYS.ocrAuto, enabled ? '1' : '0');
 }
 
 export function isValidPalette(value) {

@@ -13,6 +13,9 @@
     "start": "node tools/wheels.mjs dev",
     "check": "node tools/wheels.mjs check",
     "check:online": "node tools/wheels.mjs check --online",
+    "test": "node tools/tests/run.mjs",
+    "css": "node tools/lib/tailwind.mjs",
+    "css:watch": "node tools/lib/tailwind.mjs --watch",
     "configure": "node tools/wheels.mjs configure",
     "build": "node tools/wheels.mjs build",
     "build:open": "node tools/wheels.mjs build --open"

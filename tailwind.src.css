@@ -1,0 +1,15 @@
+/*
+ * Entry point for the Tailwind CLI.
+ *
+ * Generate the shipped stylesheet with:
+ *   npm run css           (one shot, minified)
+ *   npm run css:watch     (rebuild while editing)
+ *
+ * The output is `css/tailwind.css`, loaded by index.html **after**
+ * `css/styles.css`. That reproduces the cascade of the old Play CDN, whose
+ * stylesheet was injected at the end of <head>: utilities keep winning over
+ * the project's component classes (e.g. `btn-secondary text-red-600`).
+ */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;

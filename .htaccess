@@ -24,7 +24,11 @@ AddType application/manifest+json .webmanifest
 # Cache
 #
 # HTML and translation dictionaries are always revalidated so content updates
-# appear immediately. Static assets use a short cache and are revalidated.
+# appear immediately. JS and CSS are the application itself: they are also
+# revalidated on every load (304 when unchanged), otherwise a deploy can leave
+# the browser with a new controller.js next to an old app.js — which fails as
+# "The requested module './app.js' does not provide an export named ...".
+# Only icons keep a long cache.
 # ---------------------------------------------------------------------------
 <IfModule mod_headers.c>
   <FilesMatch "\.(html|json|webmanifest)$">
@@ -35,16 +39,29 @@ AddType application/manifest+json .webmanifest
     Header set Cache-Control "no-cache, must-revalidate"
   </Files>
 
-  <FilesMatch "\.(css|js|svg)$">
-    Header set Cache-Control "public, max-age=3600, must-revalidate"
+  <FilesMatch "\.(css|js)$">
+    Header set Cache-Control "no-cache, must-revalidate"
   </FilesMatch>
 
-  # Basic security headers. A CSP is intentionally omitted because Tailwind's
-  # CDN and Firebase require inline/eval and cross-origin connections.
+  <FilesMatch "\.(svg|png|ico|webp|woff2?)$">
+    Header set Cache-Control "public, max-age=86400"
+  </FilesMatch>
+
+  # Basic security headers. A CSP is still omitted: the theme bootstrapper in
+  # <head> is inline and Firebase/Tesseract need cross-origin connections.
   Header set X-Content-Type-Options "nosniff"
   Header set Referrer-Policy "strict-origin-when-cross-origin"
   Header set X-Frame-Options "SAMEORIGIN"
+
+  # Some shared hosts inject a Permissions-Policy advertising Chrome features
+  # that no longer exist ("browsing-topics", "run-ad-auction",
+  # "join-ad-interest-group"), which logs a console warning on every page load.
+  # Drop their copy (both the normal and the "always" table) and declare only
+  # what this app uses.
+  Header always unset Permissions-Policy
+  Header unset Permissions-Policy
   Header set Permissions-Policy "camera=(self), microphone=(), geolocation=()"
+
   Header set Cross-Origin-Opener-Policy "same-origin-allow-popups"
 </IfModule>
 
@@ -59,7 +76,7 @@ AddType application/manifest+json .webmanifest
 # ---------------------------------------------------------------------------
 # Do not expose deployment files or documentation
 # ---------------------------------------------------------------------------
-<FilesMatch "^(firebase\.json|firebase-debug\.log|firestore\.rules|firestore\.indexes\.json|README\.md|README\.pt-BR\.md|package\.json|package-lock\.json|wheels\.cmd|wheels\.sh|\.firebaserc|\.firebase.*|\.env.*|\.git.*|\.htaccess)$">
+<FilesMatch "^(firebase\.json|firebase-debug\.log|firestore\.rules|firestore\.indexes\.json|README\.md|README\.pt-BR\.md|INTEGRACAO-CONTROLADOR\.md|plano-implementacao-imagem-ocr\.md|analise-ocr-hotwheels\.md|package\.json|package-lock\.json|tailwind\.config\.cjs|tailwind\.src\.css|wheels\.cmd|wheels\.sh|\.firebaserc|\.firebase.*|\.env.*|\.git.*|\.htaccess)$">
   <IfModule mod_authz_core.c>
     Require all denied
   </IfModule>

@@ -34,6 +34,8 @@ const MIME = {
   '.woff2': 'font/woff2',
   '.txt': 'text/plain; charset=utf-8',
   '.map': 'application/json; charset=utf-8',
+  '.wasm': 'application/wasm',
+  '.onnx': 'application/octet-stream',
 };
 
 const DENIED_DIRECTORIES = new Set(['build', 'tools', 'node_modules', '.git', '.wheels']);

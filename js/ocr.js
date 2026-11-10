@@ -22,6 +22,8 @@ const DEFAULTS = Object.freeze({
   invert: false,
   /** 0 desliga. 0.8 e um bom ponto para texto de 30-50 px. */
   sharpen: 0.6,
+  /** Devolve um OffscreenCanvas (transferivel para um Worker) quando suportado. */
+  offscreen: false,
 });
 
 const CHANNELS = ['luma', 'red', 'green', 'blue', 'max', 'min'];
@@ -39,15 +41,15 @@ const clamp = (value, minimum, maximum) =>
  * Recorta `region` (coordenadas normalizadas 0..1) da imagem, aplica escala,
  * margem, rotacao e realce, e devolve um canvas pronto para o Tesseract.
  *
- * @param {HTMLImageElement|HTMLCanvasElement|ImageBitmap} image
+ * @param {HTMLImageElement|HTMLCanvasElement|ImageBitmap|OffscreenCanvas} image
  * @param {{x:number,y:number,w:number,h:number}} region
  * @param {object} [options]
- * @returns {HTMLCanvasElement}
+ * @returns {HTMLCanvasElement|OffscreenCanvas}
  */
 export function prepareRegion(image, region, options = {}) {
   const opts = { ...DEFAULTS, ...options };
-  const imageWidth = image.naturalWidth || image.width || 1;
-  const imageHeight = image.naturalHeight || image.height || 1;
+  const imageWidth = /** @type {any} */ (image).naturalWidth || image.width || 1;
+  const imageHeight = /** @type {any} */ (image).naturalHeight || image.height || 1;
 
   const rx = clamp(Number(region?.x) || 0, 0, 1);
   const ry = clamp(Number(region?.y) || 0, 0, 1);
@@ -76,8 +78,10 @@ export function prepareRegion(image, region, options = {}) {
    * estatisticas, viraria o "fundo dominante" do histograma e achataria o
    * contraste do texto (foi assim que o fundo ficou cinza na primeira versao).
    */
-  const cropCanvas = makeCanvas(drawWidth, drawHeight);
-  const cropContext = cropCanvas.getContext('2d', { willReadFrequently: true });
+  const cropCanvas = makeCanvas(drawWidth, drawHeight, opts.offscreen);
+  const cropContext = /** @type {CanvasRenderingContext2D} */ (
+    cropCanvas.getContext('2d', { willReadFrequently: true })
+  );
   cropContext.imageSmoothingEnabled = true;
   cropContext.imageSmoothingQuality = 'high';
   cropContext.drawImage(image, sx, sy, sw, sh, 0, 0, drawWidth, drawHeight);
@@ -95,8 +99,11 @@ export function prepareRegion(image, region, options = {}) {
   const canvas = makeCanvas(
     (swap ? drawHeight : drawWidth) + pad * 2,
     (swap ? drawWidth : drawHeight) + pad * 2,
+    opts.offscreen,
   );
-  const context = canvas.getContext('2d', { willReadFrequently: true });
+  const context = /** @type {CanvasRenderingContext2D} */ (
+    canvas.getContext('2d', { willReadFrequently: true })
+  );
   context.fillStyle = '#ffffff';
   context.fillRect(0, 0, canvas.width, canvas.height);
   /* Multiplos de 90 graus nao precisam de reamostragem. */
@@ -114,7 +121,9 @@ export function prepareRegion(image, region, options = {}) {
 /** Aplica o pipeline de realce em um canvas existente (in place). */
 export function enhanceCanvas(canvas, options = {}) {
   const opts = { ...DEFAULTS, ...options };
-  const context = canvas.getContext('2d', { willReadFrequently: true });
+  const context = /** @type {CanvasRenderingContext2D} */ (
+    canvas.getContext('2d', { willReadFrequently: true })
+  );
   const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
 
   enhancePixels(imageData.data, canvas.width, canvas.height, opts);
@@ -577,10 +586,17 @@ function normalizeRotation(value) {
   return ((Math.round(degrees / 90) * 90) % 360 + 360) % 360;
 }
 
-function makeCanvas(width, height) {
+function makeCanvas(width, height, offscreen = false) {
+  const w = Math.max(1, Math.round(width));
+  const h = Math.max(1, Math.round(height));
+
+  if (offscreen && typeof OffscreenCanvas === 'function') {
+    return new OffscreenCanvas(w, h);
+  }
+
   const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, Math.round(width));
-  canvas.height = Math.max(1, Math.round(height));
+  canvas.width = w;
+  canvas.height = h;
   return canvas;
 }
 

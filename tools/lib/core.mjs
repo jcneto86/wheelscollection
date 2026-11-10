@@ -27,7 +27,7 @@ export const LOCALES = ['en-CA', 'fr-CA', 'pt-BR'];
 export const PALETTES = ['crimson', 'ocean', 'emerald', 'violet', 'amber'];
 export const DEFAULT_COLLECTION = 'hotwheels_items';
 
-export const RUNTIME_FILES = ['index.html', 'manifest.webmanifest', 'robots.txt', '.htaccess'];
+export const RUNTIME_FILES = ['index.html', 'manifest.webmanifest', 'robots.txt', '.htaccess', 'sw.js'];
 export const RUNTIME_DIRS = ['css', 'js', 'lang', 'assets'];
 
 export const REQUIRED_FILES = [
@@ -43,6 +43,8 @@ export const REQUIRED_FILES = [
         'js/i18n.js',
         'js/image-crop.js',
         'js/ocr.js',
+        'js/ocr-onnx.js',
+        'js/ocr-worker.js',
         'js/preferences.js',
         'js/router.js',
       ];

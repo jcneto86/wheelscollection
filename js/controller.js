@@ -15,7 +15,7 @@
  * Everything is wired in `init()`, which Alpine calls once the DOM is ready.
  */
 
-import { attachOcrPanel, terminateOcr } from './app.js';
+import { attachOcrPanel, terminateOcr, preloadOcr, isMeteredConnection } from './app.js';
 import { CropSession } from './image-crop.js';
 import { LIMITS, isFirebaseConfigured } from './firebase-config.js';
 import { LOCALES, initI18n, translate } from './i18n.js';
@@ -150,6 +150,7 @@ export function createApp() {
 
     cropper: { open: false, loading: false, zoom: 1, minZoom: 1, error: '' },
     ocr: {
+      open: false,
       scanning: false,
       auto: false,
       progress: 0,
@@ -810,6 +811,10 @@ export function createApp() {
         return;
       }
 
+      // Warm up the neural OCR while the user adjusts the crop. Skipped on
+      // metered connections because it downloads the models (~15 MB).
+      if (!isMeteredConnection()) void preloadOcr();
+
       this.cropper.open = true;
       this.cropper.loading = true;
       this.cropper.error = '';
@@ -960,6 +965,24 @@ export function createApp() {
       ];
       const stage = stages.includes(this.ocr.stage) ? this.ocr.stage : 'library';
       return this.t(`ocrStatus${capitalize(stage)}`);
+    },
+
+    /** Short status shown in the collapsed accordion header. */
+    ocrStatusSummary() {
+      if (this.ocr.scanning) {
+        return this.ocr.auto ? this.t('ocrAutoReading') : this.ocrStageLabel();
+      }
+      if (this.ocr.error) return this.t('ocrStatusError');
+      if (this.ocr.result) return this.t('ocrStatusDone');
+      return this.t('ocrStatusIdle');
+    },
+
+    /** Colour of the status line (idle/running/success/error). */
+    ocrStatusClass() {
+      if (this.ocr.scanning) return 'text-brand-700 dark:text-brand-300';
+      if (this.ocr.error) return 'text-red-600 dark:text-red-400';
+      if (this.ocr.result) return 'text-emerald-600 dark:text-emerald-400';
+      return 'text-slate-500 dark:text-slate-400';
     },
 
     /* ------------------------------------------------------------------ */

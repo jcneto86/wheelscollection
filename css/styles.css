@@ -575,6 +575,12 @@ body {
   flex: none;
 }
 
+.spinner-sm {
+  width: 0.8rem;
+  height: 0.8rem;
+  border-width: 1.5px;
+}
+
 .spinner-lg {
   width: 2rem;
   height: 2rem;

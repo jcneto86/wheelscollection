@@ -7,6 +7,7 @@ import {
   extractCarName,
   extractCollectionName,
   extractCollectionNumber,
+  improveWordSpacing,
   mergeScanResult,
   parseHotWheelsText,
 } from '../../js/app.js';
@@ -17,6 +18,26 @@ import {
 
 test('car name survives packaging noise', () => {
   const name = extractCarName(['HOT WHEELS', '90 ACURA NSX', 'AGE 3+', 'MATTEL']);
+  assert.match(name, /ACURA NSX/);
+});
+
+test('glued OCR words get their spaces back', () => {
+  assert.equal(improveWordSpacing('90ACURANSX'), '90 ACURA NSX');
+  assert.equal(improveWordSpacing('HOTWHEELS2024'), 'HOT WHEELS 2024');
+  assert.equal(improveWordSpacing('ALFAROMEOGIULIA'), 'ALFA ROMEO GIULIA');
+  assert.equal(improveWordSpacing('COLLECTOR1/64'), 'COLLECTOR 1/64');
+  assert.equal(improveWordSpacing('HWTHE 90S'), 'HW THE 90S');
+  assert.equal(improveWordSpacing('V8 ENGINE'), 'V8 ENGINE');
+});
+
+test('box-edge glyphs are removed from the car name', () => {
+  assert.equal(extractCarName(['T 90 ACURA NSX T']), '90 ACURA NSX');
+  assert.equal(extractCarName(['I90 ACURA NSX']), '90 ACURA NSX');
+  assert.equal(extractCarName(['Tesla Model S']), 'Tesla Model S');
+});
+
+test('car name is recovered from glued OCR output', () => {
+  const name = extractCarName(['90ACURANSX', '2/10']);
   assert.match(name, /ACURA NSX/);
 });
 

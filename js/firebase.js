@@ -1,3 +1,4 @@
+// @ts-nocheck -- Firebase is imported from gstatic URLs that TypeScript cannot resolve offline.
 import { initializeApp, getApp, getApps } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js';
 import {
   browserLocalPersistence,

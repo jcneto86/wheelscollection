@@ -495,7 +495,7 @@
       class="flex min-h-screen flex-col"
     >
       <!-- Navbar -->
-      <header class="sticky top-0 z-30 border-b border-slate-200/80 bg-slate-50/85 backdrop-blur-md dark:border-slate-800/80 dark:bg-slate-950/80">
+      <header class="sticky top-0 z-30 border-b border-slate-200/80 bg-[#e6e6e6] backdrop-blur-md dark:border-slate-800/80 dark:bg-slate-950/80">
         <div class="mx-auto flex h-16 max-w-7xl items-center justify-between gap-3 px-4 sm:px-6 lg:px-8">
           <div class="flex min-w-0 items-center gap-2">
             <a :href="link('/')" class="flex items-center gap-2.5 rounded-lg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-500" :aria-label="t('navHome')">
@@ -849,89 +849,120 @@
                 <p class="mt-1 text-xs leading-relaxed text-slate-500 dark:text-slate-400" x-text="t('informationSubtitle')"></p>
 
                 <!-- Local OCR: fills name + description from the packaging photo -->
-                <div class="mt-5 rounded-2xl border border-brand-200 bg-brand-50/60 p-4 dark:border-brand-900/60 dark:bg-brand-950/20">
-                  <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                    <div class="flex min-w-0 items-start gap-3">
-                      <span class="flex h-9 w-9 flex-none items-center justify-center rounded-xl bg-brand-100 text-brand-700 dark:bg-brand-900/40 dark:text-brand-300">
-                        <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
-                          <path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"></path>
-                          <path d="M7 12h10M12 7v10"></path>
-                        </svg>
-                      </span>
-                      <div class="min-w-0">
-                        <p class="text-sm font-bold" x-text="t('ocrTitle')"></p>
-                        <p class="mt-1 text-xs leading-relaxed text-slate-500 dark:text-slate-400" x-text="t('ocrHint')"></p>
-                      </div>
-                    </div>
-
-                    <button
-                      type="button"
-                      class="btn-secondary shrink-0"
-                      @click="scanPackaging()"
-                      :disabled="ocr.scanning || formSaving || formLoading || !form.imageBase64"
-                      :title="!form.imageBase64 ? t('ocrNeedsImage') : t('ocrScan')"
-                    >
-                      <span x-show="ocr.scanning" class="spinner"></span>
-                      <svg x-show="!ocr.scanning" class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
-                        <path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"></path>
-                        <path d="M7 12h10"></path>
-                      </svg>
-                      <span x-text="ocr.scanning ? t('ocrScanning') : (ocr.result ? t('ocrRescan') : t('ocrScan'))"></span>
-                    </button>
-                  </div>
-
-                  <label class="mt-3 flex items-center gap-2 text-[11px] font-medium text-slate-500 dark:text-slate-400">
-                    <input
-                      type="checkbox"
-                      class="h-3.5 w-3.5 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
-                      :checked="ocr.autoEnabled !== false"
-                      @change="setOcrAuto($event.target.checked)"
-                    />
-                    <span x-text="t('ocrAutoLabel')"></span>
-                  </label>
-                  <p class="mt-1 text-[10px] text-slate-400 dark:text-slate-500" x-text="t('ocrAutoHint')"></p>
-
-                  <p
-                    x-show="!form.imageBase64"
-                    class="mt-2 text-[11px] font-medium text-amber-700 dark:text-amber-400"
-                    x-text="t('ocrNeedsImage')"
-                  ></p>
-
-                  <div x-show="ocr.scanning" x-transition class="mt-3">
-                    <div class="flex items-center justify-between gap-3 text-[11px] font-medium text-slate-500 dark:text-slate-400">
-                      <span class="truncate" x-text="ocr.auto ? t('ocrAutoReading') : ocrStageLabel()"></span>
-                      <span class="tabular-nums" x-text="`${ocr.progress}%`"></span>
-                    </div>
-                    <div
-                      class="mt-1.5 h-1.5 overflow-hidden rounded-full bg-white dark:bg-slate-900/70"
-                      role="progressbar"
-                      aria-valuemin="0"
-                      aria-valuemax="100"
-                      :aria-valuenow="ocr.progress"
-                    >
-                      <div class="h-full rounded-full bg-brand-500 transition-[width] duration-300" :style="`width: ${ocr.progress}%`"></div>
-                    </div>
-                    <button
-                      type="button"
-                      class="mt-2 text-[11px] font-semibold text-brand-700 hover:underline dark:text-brand-300"
-                      @click="cancelOcrScan()"
-                      x-text="t('cancel')"
-                    ></button>
-                  </div>
-
-                  <p
-                    x-show="ocr.error && !ocr.scanning"
-                    class="mt-2 text-[11px] font-medium text-red-600 dark:text-red-400"
-                    x-text="ocr.error"
-                  ></p>
-
-                  <details
-                    x-show="ocr.result && !ocr.scanning"
-                    class="mt-3 overflow-hidden rounded-xl border border-brand-200/80 bg-white/70 dark:border-brand-900/60 dark:bg-slate-900/40"
+                <div class="mt-5 overflow-hidden rounded-2xl border border-brand-200 bg-brand-50/60 dark:border-brand-900/60 dark:bg-brand-950/20">
+                  <button
+                    type="button"
+                    class="flex w-full items-center gap-3 p-4 text-left transition-colors hover:bg-brand-100/50 dark:hover:bg-brand-900/20"
+                    @click="ocr.open = !ocr.open"
+                    :aria-expanded="ocr.open ? 'true' : 'false'"
+                    :aria-controls="'ocr-panel-details'"
+                    :title="t('ocrToggleDetails')"
                   >
-                    <summary class="cursor-pointer list-none px-3 py-2 text-[11px] font-semibold text-slate-600 dark:text-slate-300" x-text="t('ocrRawText')"></summary>
-                    <pre class="max-h-40 overflow-auto whitespace-pre-wrap break-words border-t border-brand-200/70 px-3 py-2 text-[10px] leading-relaxed text-slate-500 dark:border-brand-900/60 dark:text-slate-400" x-text="ocr.result?.rawText || ''"></pre>
-                  </details>
+                    <span class="flex h-9 w-9 flex-none items-center justify-center rounded-xl bg-brand-100 text-brand-700 dark:bg-brand-900/40 dark:text-brand-300">
+                      <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                        <path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"></path>
+                        <path d="M7 12h10M12 7v10"></path>
+                      </svg>
+                    </span>
+                    <span class="min-w-0 flex-1">
+                      <span class="block text-sm font-bold" x-text="t('ocrTitle')"></span>
+                      <span class="mt-0.5 flex items-center gap-1.5 text-[11px] font-medium" :class="ocrStatusClass()">
+                        <span x-show="ocr.scanning" class="spinner spinner-sm"></span>
+                        <span class="truncate" x-text="ocrStatusSummary()"></span>
+                        <span x-show="ocr.scanning" class="tabular-nums" x-text="`${ocr.progress}%`"></span>
+                      </span>
+                    </span>
+                    <svg
+                      class="h-4 w-4 flex-none text-slate-400 transition-transform duration-200"
+                      :class="{ 'rotate-180': ocr.open }"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      aria-hidden="true"
+                    >
+                      <path d="M6 9l6 6 6-6"></path>
+                    </svg>
+                  </button>
+
+                  <div
+                    id="ocr-panel-details"
+                    x-show="ocr.open"
+                    x-transition
+                    class="border-t border-brand-200/70 p-4 dark:border-brand-900/60"
+                  >
+                    <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <p class="text-xs leading-relaxed text-slate-500 dark:text-slate-400" x-text="t('ocrHint')"></p>
+
+                      <button
+                        type="button"
+                        class="btn-secondary shrink-0"
+                        @click="scanPackaging()"
+                        :disabled="ocr.scanning || formSaving || formLoading || !form.imageBase64"
+                        :title="!form.imageBase64 ? t('ocrNeedsImage') : t('ocrScan')"
+                      >
+                        <span x-show="ocr.scanning" class="spinner"></span>
+                        <svg x-show="!ocr.scanning" class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                          <path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"></path>
+                          <path d="M7 12h10"></path>
+                        </svg>
+                        <span x-text="ocr.scanning ? t('ocrScanning') : (ocr.result ? t('ocrRescan') : t('ocrScan'))"></span>
+                      </button>
+                    </div>
+
+                    <label class="mt-3 flex items-center gap-2 text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                      <input
+                        type="checkbox"
+                        class="h-3.5 w-3.5 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
+                        :checked="ocr.autoEnabled !== false"
+                        @change="setOcrAuto($event.target.checked)"
+                      />
+                      <span x-text="t('ocrAutoLabel')"></span>
+                    </label>
+                    <p class="mt-1 text-[10px] text-slate-400 dark:text-slate-500" x-text="t('ocrAutoHint')"></p>
+
+                    <p
+                      x-show="!form.imageBase64"
+                      class="mt-2 text-[11px] font-medium text-amber-700 dark:text-amber-400"
+                      x-text="t('ocrNeedsImage')"
+                    ></p>
+
+                    <div x-show="ocr.scanning" x-transition class="mt-3">
+                      <div class="flex items-center justify-between gap-3 text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                        <span class="truncate" x-text="ocr.auto ? t('ocrAutoReading') : ocrStageLabel()"></span>
+                        <span class="tabular-nums" x-text="`${ocr.progress}%`"></span>
+                      </div>
+                      <div
+                        class="mt-1.5 h-1.5 overflow-hidden rounded-full bg-white dark:bg-slate-900/70"
+                        role="progressbar"
+                        aria-valuemin="0"
+                        aria-valuemax="100"
+                        :aria-valuenow="ocr.progress"
+                      >
+                        <div class="h-full rounded-full bg-brand-500 transition-[width] duration-300" :style="`width: ${ocr.progress}%`"></div>
+                      </div>
+                      <button
+                        type="button"
+                        class="mt-2 text-[11px] font-semibold text-brand-700 hover:underline dark:text-brand-300"
+                        @click="cancelOcrScan()"
+                        x-text="t('cancel')"
+                      ></button>
+                    </div>
+
+                    <p
+                      x-show="ocr.error && !ocr.scanning"
+                      class="mt-2 text-[11px] font-medium text-red-600 dark:text-red-400"
+                      x-text="ocr.error"
+                    ></p>
+
+                    <details
+                      x-show="ocr.result && !ocr.scanning"
+                      class="mt-3 overflow-hidden rounded-xl border border-brand-200/80 bg-white/70 dark:border-brand-900/60 dark:bg-slate-900/40"
+                    >
+                      <summary class="cursor-pointer list-none px-3 py-2 text-[11px] font-semibold text-slate-600 dark:text-slate-300" x-text="t('ocrRawText')"></summary>
+                      <pre class="max-h-40 overflow-auto whitespace-pre-wrap break-words border-t border-brand-200/70 px-3 py-2 text-[10px] leading-relaxed text-slate-500 dark:border-brand-900/60 dark:text-slate-400" x-text="ocr.result?.rawText || ''"></pre>
+                    </details>
+                  </div>
                 </div>
 
                 <div class="mt-5 space-y-5">
@@ -1472,6 +1503,14 @@
     </div>
 
     <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', function () {
+          navigator.serviceWorker.register('./sw.js').catch(function (error) {
+            console.warn('[SW] Registration failed:', error);
+          });
+        });
+      }
+
       // If the ES module or a CDN fails, show a readable message instead of
       // leaving the splash screen forever.
       window.setTimeout(function () {

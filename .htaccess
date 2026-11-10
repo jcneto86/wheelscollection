@@ -10,6 +10,9 @@ Options -Indexes -MultiViews
 DirectoryIndex index.html
 AddDefaultCharset UTF-8
 AddType application/manifest+json .webmanifest
+AddType application/wasm .wasm
+AddType application/octet-stream .onnx
+AddType text/javascript .mjs
 
 # ---------------------------------------------------------------------------
 # Compression
@@ -18,6 +21,7 @@ AddType application/manifest+json .webmanifest
   AddOutputFilterByType DEFLATE text/html text/plain text/css text/javascript
   AddOutputFilterByType DEFLATE application/javascript application/json
   AddOutputFilterByType DEFLATE application/manifest+json image/svg+xml
+  AddOutputFilterByType DEFLATE application/wasm
 </IfModule>
 
 # ---------------------------------------------------------------------------
@@ -28,7 +32,7 @@ AddType application/manifest+json .webmanifest
 # revalidated on every load (304 when unchanged), otherwise a deploy can leave
 # the browser with a new controller.js next to an old app.js — which fails as
 # "The requested module './app.js' does not provide an export named ...".
-# Only icons keep a long cache.
+# Only icons and heavy model binaries keep a long cache.
 # ---------------------------------------------------------------------------
 <IfModule mod_headers.c>
   <FilesMatch "\.(html|json|webmanifest)$">
@@ -39,12 +43,21 @@ AddType application/manifest+json .webmanifest
     Header set Cache-Control "no-cache, must-revalidate"
   </Files>
 
-  <FilesMatch "\.(css|js)$">
+  <Files "sw.js">
+    Header set Cache-Control "no-cache, must-revalidate"
+    Header set Service-Worker-Allowed "/"
+  </Files>
+
+  <FilesMatch "\.(css|js|mjs)$">
     Header set Cache-Control "no-cache, must-revalidate"
   </FilesMatch>
 
   <FilesMatch "\.(svg|png|ico|webp|woff2?)$">
     Header set Cache-Control "public, max-age=86400"
+  </FilesMatch>
+
+  <FilesMatch "\.(wasm|onnx)$">
+    Header set Cache-Control "public, max-age=31536000, immutable"
   </FilesMatch>
 
   # Basic security headers. A CSP is still omitted: the theme bootstrapper in

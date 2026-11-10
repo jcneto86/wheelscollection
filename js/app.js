@@ -20,6 +20,7 @@
 
 import { prepareRegion } from './ocr.js';
 import { loadOcrAuto, saveOcrAuto } from './preferences.js';
+import { runPpOcr, terminateOcrWorker, preloadOcrModels } from './ocr-onnx.js';
 
 /* -------------------------------------------------------------------------- */
 /* Tesseract.js configuration                                                 */
@@ -437,6 +438,7 @@ async function getWorker() {
 
 /** Frees the worker and all language data held in memory. */
 export async function terminateOcr() {
+  await terminateOcrWorker();
   activeRun = null;
 
   const worker = workerInstance;
@@ -450,6 +452,18 @@ export async function terminateOcr() {
   } catch (error) {
     console.warn('[OCR] Could not terminate the worker cleanly:', error);
   }
+}
+
+/**
+ * Warms up the neural OCR worker without blocking the UI.
+ * Safe to call repeatedly; the underlying preload is shared.
+ */
+export function preloadOcr(onProgress) {
+  return preloadOcrModels(onProgress).catch((error) => {
+    // A failed warm-up is harmless: the next scan retries and falls back.
+    console.info('[OCR] Neural warm-up skipped:', error?.message || error);
+    return null;
+  });
 }
 
 /* -------------------------------------------------------------------------- */
@@ -584,6 +598,59 @@ async function runScan(imageBase64, options) {
   if (cached) {
     emitProgress(run, 'parsing', 1, 'from cache');
     return cached;
+  }
+
+  // Attempt primary neural OCR (PP-OCRv4 via ONNX Web in Dedicated Worker)
+  if (typeof Worker !== 'undefined') {
+    try {
+      emitProgress(run, 'library', 0.1, 'loading neural OCR');
+      const onnxResult = await runPpOcr(source, {
+        signal: run.signal,
+        onProgress: (p) => {
+          emitProgress(run, p.stage || 'full', p.progress || 0.5, p.detail || '');
+        },
+      });
+
+      if (onnxResult && onnxResult.lines && onnxResult.lines.length > 0) {
+        emitProgress(run, 'parsing', 0.9, 'organising text');
+        const sourceWidth = source.naturalWidth || source.width || 1;
+        const sourceHeight = source.naturalHeight || source.height || 1;
+
+        const lines = onnxResult.lines.map((l) => ({
+          text: improveWordSpacing(l.text),
+          source: 'onnx',
+          confidence: Math.round((l.confidence || 0.8) * 100),
+          relativeX: l.box ? l.box.x / sourceWidth : 0,
+          relativeY: l.box ? l.box.y / sourceHeight : 0,
+        }));
+
+        const name = extractCarName(lines);
+        const collectionName = extractCollectionName(lines, {
+          exclude: name ? [name] : [],
+        });
+        const collectionNumber = extractCollectionNumber(lines);
+        const description = buildDescription({ collectionName, collectionNumber });
+        const rawText = lines.map((l) => l.text).join('\n');
+
+        emitProgress(run, 'parsing', 1, 'done');
+
+        const result = {
+          name,
+          description,
+          collectionName,
+          collectionNumber,
+          rawText,
+          lines,
+          provider: onnxResult.provider || 'onnx',
+        };
+
+        cacheSet(cacheKey, result);
+        return result;
+      }
+    } catch (onnxErr) {
+      if (isAbortError(onnxErr)) throw onnxErr;
+      console.warn('[OCR] Neural PP-OCRv4 fallback to Tesseract:', onnxErr);
+    }
   }
 
   setStage(run, 'library');
@@ -1244,6 +1311,42 @@ function containsModelWord(text) {
   return CAR_MODEL_WORDS.some((word) => value.includes(` ${word} `));
 }
 
+/** Words that may legitimately end in a single-letter suffix ("Model S"). */
+const SINGLE_LETTER_SUFFIX_GUARD = new Set([
+  'MODEL', 'CLASS', 'SERIES', 'TYPE', 'EDITION', 'TRIM',
+]);
+
+/**
+ * Removes single glyphs that the detection boxes pick up at the edges of the
+ * name, e.g. "T 90 ACURA NSX T" or "I90 ACURA NSX". Only applied when the line
+ * actually names a known brand, and never when the letter follows a word such
+ * as "Model" (Tesla Model S).
+ */
+function stripEdgeGlyphs(value) {
+  if (!containsCarBrand(value) && !containsModelWord(value)) return value;
+
+  let text = value
+    // Glued lookalike before the leading number: "I90 ACURA NSX".
+    .replace(/^[Il](?=\d{2})/, '')
+    // Isolated glyph before the leading number: "T 90 ACURA NSX".
+    .replace(/^(?:[A-Za-z]\s+)+(?=\d{2})/, '');
+
+  // Isolated glyph after a number, brand or model word: "90 ACURA NSX T".
+  const trailing = text.match(/^(.*?)(?:\s+([A-Za-z]))$/);
+  if (trailing) {
+    const anchor = trailing[1].split(/\s+/).pop() || '';
+    const guarded = SINGLE_LETTER_SUFFIX_GUARD.has(anchor.toUpperCase());
+    if (
+      !guarded &&
+      (/\d/.test(anchor) || containsCarBrand(anchor) || containsModelWord(anchor))
+    ) {
+      text = trailing[1];
+    }
+  }
+
+  return text;
+}
+
 function containsCollectionSignal(text) {
   const value = normalizeLine(text).toUpperCase();
   if (!value) return false;
@@ -1263,6 +1366,10 @@ function cleanCarName(text) {
     .replace(/\s+\b(?:NEW\s+FOR|MADE\s+IN|MATTEL|HOT\s+WHEELS)\b.*$/i, '')
     .replace(/\s{2,}/g, ' ')
     .trim();
+
+  // Strip stray box-edge glyphs before repairing digit lookalikes: otherwise
+  // "I90 ACURA NSX" is turned into "190 ACURA NSX" before the noise is gone.
+  value = stripEdgeGlyphs(value);
 
   value = value
     .replace(/^([0-9]{1,2})[OQ]\b/, (_, digits) => `${digits}0`)
@@ -1330,8 +1437,8 @@ function toLines(input) {
 
   raw.forEach((entry, index) => {
     const isObject = entry && typeof entry === 'object';
-    const text = normalizeLine(
-      isObject ? entry.text ?? entry.raw ?? '' : entry,
+    const text = improveWordSpacing(
+      normalizeLine(isObject ? entry.text ?? entry.raw ?? '' : entry),
     );
 
     if (!text) return;
@@ -1380,6 +1487,66 @@ function normalizeKey(value) {
   return normalizeLine(value)
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '');
+}
+
+/**
+ * Re-inserts spaces the CTC head sometimes omits between words.
+ *
+ * PP-OCRv4 is trained with a space class, but on short packaging fonts the
+ * blank frames between words are often too short for greedy decoding. These
+ * two deterministic passes recover the common cases without touching the
+ * original characters:
+ *
+ *   90ACURA       -> 90 ACURA
+ *   HOTWHEELS2024 -> HOT WHEELS 2024
+ *   ACURANSX      -> ACURA NSX
+ *   ALFAROMEO     -> ALFA ROMEO
+ *   HWTHE 90S     -> HW THE 90S
+ */
+const BRAND_SPACING = CAR_BRANDS
+  .map((brand) => ({ brand, compact: brand.replace(/\s+/g, '') }))
+  .sort((a, b) => b.compact.length - a.compact.length);
+
+const COMPOUND_SPACING = [['HOTWHEELS', 'HOT WHEELS']];
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export function improveWordSpacing(value) {
+  let text = String(value ?? '');
+  if (!text) return text;
+
+  // Separate letter and digit runs without splitting short tokens such as V8.
+  text = text
+    .replace(/([A-Za-z]{2,})(\d)/g, '$1 $2')
+    .replace(/(\d)([A-Za-z]{2,})/g, '$1 $2');
+
+  // Expand glued multi-word brands: ALFAROMEO -> ALFA ROMEO.
+  for (const { brand, compact } of BRAND_SPACING) {
+    if (compact === brand) continue;
+    // No trailing \b: the brand may be glued to the model (ALFAROMEOGIULIA).
+    text = text.replace(new RegExp(`\\b${escapeRegExp(compact)}`, 'g'), brand);
+  }
+
+  // Split a brand glued to the model name: ACURANSX -> ACURA NSX.
+  for (const { brand } of BRAND_SPACING) {
+    text = text.replace(
+      new RegExp(`\\b${escapeRegExp(brand)}(?=[A-Za-z])`, 'g'),
+      `${brand} `,
+    );
+  }
+
+  for (const [glued, spaced] of COMPOUND_SPACING) {
+    text = text.replace(new RegExp(`\\b${escapeRegExp(glued)}\\b`, 'gi'), spaced);
+  }
+
+  // "HW" is a two-letter prefix the packaging glues to the next word
+  // (HWTHE 90S, HWCITY). Only split when at least two letters follow, so
+  // tokens such as "HWT" or "HWY" stay untouched.
+  text = text.replace(/\bHW(?=[A-Z]{2})/g, 'HW ');
+
+  return text.replace(/\s{2,}/g, ' ').trim();
 }
 
 /**
@@ -1439,7 +1606,7 @@ function collectLines(data, { source, canvas, region, rotate = 0 }) {
   };
 
   const pushLine = (rawText, confidence, bbox) => {
-    const text = normalizeLine(rawText);
+    const text = improveWordSpacing(normalizeLine(rawText));
     if (!text || text.length < 2) return;
 
     const x0 = Number(bbox?.x0) || 0;
@@ -1989,7 +2156,9 @@ function applyScanResultToComponent(component, result, { overwrite = false } = {
  *
  * @param {object} component Alpine component instance (`this`).
  * @param {{ scan?: Function, isMetered?: () => boolean, readAuto?: () => boolean,
- *   writeAuto?: (enabled: boolean) => void }} [options]
+ *   writeAuto?: (enabled: boolean) => void, delay?: number,
+ *   timers?: { set: (callback: Function, ms: number) => any, clear: (id: any) => void }
+ * }} [options]
  * @returns {object|null} The scan session, or null when already attached.
  */
 export function attachOcrPanel(component, options = {}) {
@@ -1998,6 +2167,7 @@ export function attachOcrPanel(component, options = {}) {
 
   if (!component.ocr) {
     component.ocr = {
+      open: false,
       scanning: false,
       auto: false,
       progress: 0,
@@ -2006,6 +2176,8 @@ export function attachOcrPanel(component, options = {}) {
       error: '',
       autoEnabled: true,
     };
+  } else if (component.ocr.open === undefined) {
+    component.ocr.open = false;
   }
 
   const sources = { current: null };

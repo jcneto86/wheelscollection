@@ -14,6 +14,7 @@
     "check": "node tools/wheels.mjs check",
     "check:online": "node tools/wheels.mjs check --online",
     "test": "node tools/tests/run.mjs",
+    "typecheck": "node tools/lib/typecheck.mjs",
     "css": "node tools/lib/tailwind.mjs",
     "css:watch": "node tools/lib/tailwind.mjs --watch",
     "configure": "node tools/wheels.mjs configure",

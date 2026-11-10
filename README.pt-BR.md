@@ -530,6 +530,7 @@ npm run build -- --online          # testa CDNs e apiKey antes
 npm run build -- --open            # abre a pasta build ao final
 npm run build -- --skip-check      # emergência; não recomendado
 npm run build -- --allow-placeholder
+npm run build -- --webgpu          # inclui o runtime ONNX WebGPU (+21 MB)
 ```
 
 O resultado é `appphp/build/`, pronta para upload. Envie o **conteúdo** dela

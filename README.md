@@ -533,6 +533,7 @@ npm run build -- --online          # tests CDNs and apiKey first
 npm run build -- --open            # opens the build folder at the end
 npm run build -- --skip-check      # emergency; not recommended
 npm run build -- --allow-placeholder
+npm run build -- --webgpu          # bundles the WebGPU ONNX runtime (+21 MB)
 ```
 
 The result is `appphp/build/`, ready for upload. Upload the **contents** of that

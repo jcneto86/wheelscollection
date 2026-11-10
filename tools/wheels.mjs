@@ -61,7 +61,7 @@ const VALUE_FLAGS = new Map([
 ]);
 
 const BOOLEAN_FLAGS = new Set([
-  'open', 'watch', 'online', 'yes', 'test', 'skip-check', 'allow-placeholder', 'help', 'version',
+  'open', 'watch', 'online', 'yes', 'test', 'skip-check', 'allow-placeholder', 'webgpu', 'help', 'version',
 ]);
 
 function parseBoolean(value) {
@@ -153,6 +153,7 @@ function printHelp() {
   log.plain('  --online             Testa CDNs e a chave do Firebase (check/build)');
   log.plain('  --skip-check         Build sem verificacoes (nao recomendado)');
   log.plain('  --allow-placeholder  Gera o build mesmo sem Firebase configurado');
+  log.plain('  --webgpu             Inclui o binario WebGPU/WebNN do ONNX (~21 MB extra)');
   log.plain('  -y, --yes            Nao faz perguntas (configure)');
   log.plain('  --test / --no-test   Testa (ou nao) a chave do Firebase');
   log.blank();

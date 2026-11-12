@@ -9,6 +9,7 @@
  *   #/                       dashboard
  *   #/login                  authentication
  *   #/settings               preferences
+ *   #/collections            managed collections (name + year)
  *   #/collection/new         new item form
  *   #/collection/:id         item details
  *   #/collection/:id/edit    edit item form
@@ -113,6 +114,10 @@ export function resolve(hash) {
 
   if (path === '/settings') {
     return route('settings', path, {}, query);
+  }
+
+  if (path === '/collections') {
+    return route('collections', path, {}, query);
   }
 
   if (path === '/collection/new') {

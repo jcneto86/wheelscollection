@@ -26,6 +26,9 @@ export const firebaseConfig = Object.freeze({
  */
 export const COLLECTION_NAME = 'hotwheels_items';
 
+/** Managed collections (name + year) owned by each user. */
+export const COLLECTIONS_NAME = 'hotwheels_collections';
+
 /** Hard limits shared by the UI and Firestore rules. */
 export const LIMITS = Object.freeze({
   name: 120,
@@ -34,6 +37,10 @@ export const LIMITS = Object.freeze({
   imageSide: 500,
   minPassword: 6,
   maxSourceFileBytes: 20 * 1024 * 1024,
+  collectionName: 80,
+  collectionYearMin: 1968,
+  /** Documents fetched per page on the home grid. */
+  pageSize: 24,
 });
 
 const REQUIRED_KEYS = ['apiKey', 'authDomain', 'projectId', 'appId'];

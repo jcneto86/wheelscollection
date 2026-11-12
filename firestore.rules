@@ -16,6 +16,8 @@ service cloud.firestore {
           'name',
           'description',
           'imageBase64',
+          'collectionId',
+          'specialEdition',
           'createdAt',
           'updatedAt'
         ])
@@ -33,11 +35,39 @@ service cloud.firestore {
         && data.name.size() > 0
         && data.name.size() <= 120
         && data.description is string
-        && data.description.size() > 0
         && data.description.size() <= 2000
         && data.imageBase64 is string
         && data.imageBase64.size() > 0
         && data.imageBase64.size() <= 900000
+        && (!('collectionId' in data) || (data.collectionId is string && data.collectionId.size() <= 128))
+        && (!('specialEdition' in data) || data.specialEdition is bool)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidCollection(data) {
+      return data.keys().hasOnly([
+          'userId',
+          'name',
+          'year',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasAll([
+          'userId',
+          'name',
+          'year',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.userId is string
+        && data.userId == request.auth.uid
+        && data.name is string
+        && data.name.size() > 0
+        && data.name.size() <= 80
+        && data.year is int
+        && data.year >= 1968
+        && data.year <= 2100
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -53,6 +83,21 @@ service cloud.firestore {
         && request.resource.data.userId == request.auth.uid
         && request.resource.data.createdAt == resource.data.createdAt
         && isValidItem(request.resource.data);
+
+      allow delete: if isOwner(resource.data);
+    }
+
+    match /hotwheels_collections/{collectionId} {
+      allow read: if isOwner(resource.data);
+
+      allow create: if isSignedIn()
+        && request.resource.data.userId == request.auth.uid
+        && isValidCollection(request.resource.data);
+
+      allow update: if isOwner(resource.data)
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.createdAt == resource.data.createdAt
+        && isValidCollection(request.resource.data);
 
       allow delete: if isOwner(resource.data);
     }

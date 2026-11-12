@@ -40,6 +40,7 @@ const PRECACHE_ASSETS = [
   './lang/pt-BR.json',
   './assets/app_icon.png',
   './assets/app_icon.svg',
+  './assets/icon/th_icon.png',
 ];
 
 self.addEventListener('install', (event) => {

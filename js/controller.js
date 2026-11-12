@@ -50,6 +50,7 @@ let dragState = null;
 let toastTimer = 0;
 let unsubscribeAuth = null;
 let unsubscribeItems = null;
+let unsubscribeCollections = null;
 let mediaQuery = null;
 let mediaListener = null;
 let intendedPath = null;
@@ -57,6 +58,19 @@ let intendedPath = null;
 /** Resolves after the first collection snapshot (or on error). */
 let itemsReady = Promise.resolve();
 let resolveItems = null;
+
+/* Smart loading ------------------------------------------------------------ */
+
+/** `limit` of the active items subscription (0 means "everything"). */
+let requestedLimit = 0;
+/** Limit to restore after leaving the hybrid (search) mode. */
+let restoreLimit = 0;
+let sentinelObserver = null;
+let syncTimer = 0;
+let searchTimer = 0;
+const SEARCH_DEBOUNCE = 350;
+/** Deep-link lookups in flight, so a snapshot cannot duplicate the request. */
+const detailLookups = new Set();
 
 /** Resolves when the authentication state is known. */
 let resolveAuthGate = null;
@@ -124,9 +138,24 @@ export function createApp() {
     items: [],
     itemsLoading: true,
     itemsError: '',
+    itemsLoadingMore: false,
+    itemsComplete: false,
+    itemsSyncMode: false,
+    itemsTotal: 0,
     search: '',
+    specialOnly: false,
+    selectedCollections: [],
+    collectionFilterOpen: false,
+    collectionCounts: {},
+
+    collections: [],
+    collectionsLoading: false,
+    collectionsError: '',
 
     route: { name: 'home', path: '/', params: {} },
+
+    detailFallback: null,
+    detailLoading: false,
 
     locale: preferences.locale,
     locales: LOCALES,
@@ -140,13 +169,33 @@ export function createApp() {
     deleting: false,
     deleteTarget: null,
 
-    form: { id: null, name: '', description: '', imageBase64: '' },
+    form: {
+      id: null,
+      name: '',
+      description: '',
+      imageBase64: '',
+      collectionId: '',
+      specialEdition: false,
+    },
     formMode: 'new',
     formLoading: false,
     formSaving: false,
     formErrors: {},
     formError: '',
     formNotFound: false,
+
+    collectionForm: {
+      open: false,
+      mode: 'new',
+      id: null,
+      name: '',
+      year: new Date().getFullYear(),
+      returnTo: 'manage',
+      saving: false,
+      errors: {},
+      error: '',
+    },
+    collectionDelete: { open: false, target: null, deleting: false },
 
     cropper: { open: false, loading: false, zoom: 1, minZoom: 1, error: '' },
     ocr: {
@@ -175,6 +224,17 @@ export function createApp() {
       if (hasWindow) document.documentElement.lang = this.locale;
 
       attachOcrPanel(this);
+
+      /* Search and filters need the full list, so they switch the
+         subscription into hybrid mode (see `syncAllItems`). */
+      if (typeof this.$watch === 'function') {
+        this.$watch('search', () => this.scheduleSyncCheck(SEARCH_DEBOUNCE));
+        this.$watch('specialOnly', () => this.scheduleSyncCheck(0));
+        this.$watch('selectedCollections', () => this.scheduleSyncCheck(0));
+        this.$watch('collectionFilterOpen', (open) => {
+          if (open) this.loadCollectionCounts();
+        });
+      }
 
       router = createRouter((next) => this.handleRoute(next));
 
@@ -213,6 +273,10 @@ export function createApp() {
           this.stopItems();
           this.items = [];
           this.itemsLoading = false;
+          this.collections = [];
+          this.collectionsLoading = false;
+          this.collectionsError = '';
+          this.selectedCollections = [];
           if (previous) this.resetForm();
         }
 
@@ -224,8 +288,20 @@ export function createApp() {
     destroy() {
       if (unsubscribeAuth) unsubscribeAuth();
       if (unsubscribeItems) unsubscribeItems();
+      if (unsubscribeCollections) unsubscribeCollections();
       unsubscribeAuth = null;
       unsubscribeItems = null;
+      unsubscribeCollections = null;
+
+      clearTimeout(searchTimer);
+      clearTimeout(syncTimer);
+      searchTimer = 0;
+      syncTimer = 0;
+
+      if (sentinelObserver) {
+        sentinelObserver.disconnect();
+        sentinelObserver = null;
+      }
 
       if (mediaQuery && mediaListener) {
         mediaQuery.removeEventListener?.('change', mediaListener);
@@ -260,6 +336,9 @@ export function createApp() {
       };
       this.accountMenuOpen = false;
       this.deleteOpen = false;
+      this.collectionForm.open = false;
+      this.collectionDelete.open = false;
+      this.collectionFilterOpen = false;
 
       if (!this.authReady || this.firebaseMissing) return;
 
@@ -274,6 +353,15 @@ export function createApp() {
         intendedPath = null;
         router.navigate(target, { replace: true });
         return;
+      }
+
+      if (next.name === 'details') {
+        this.detailFallback = null;
+        this.detailLoading = false;
+        this.loadItemForDetails(next.params?.id);
+      } else {
+        this.detailFallback = null;
+        this.detailLoading = false;
       }
 
       if (next.name === 'form') {
@@ -455,39 +543,231 @@ export function createApp() {
 
       this.itemsLoading = true;
       this.itemsError = '';
+      this.itemsLoadingMore = false;
+      this.itemsComplete = false;
+      this.itemsSyncMode = false;
+      this.itemsTotal = 0;
+      this.collectionCounts = {};
+      this.detailFallback = null;
+
+      requestedLimit = LIMITS.pageSize;
+      restoreLimit = requestedLimit;
 
       itemsReady = new Promise((resolve) => {
         resolveItems = resolve;
       });
 
-      const release = () => {
-        if (resolveItems) {
-          resolveItems();
-          resolveItems = null;
-        }
-      };
+      this.subscribeItems(requestedLimit);
+      this.refreshItemsTotal();
+      this.startCollections(user);
+    },
+
+    /**
+     * Swaps the items subscription for a new `limit`.
+     * `size = 0` fetches everything (hybrid search mode).
+     */
+    subscribeItems(size) {
+      if (!firebase || !this.user) return;
 
       if (unsubscribeItems) {
         unsubscribeItems();
         unsubscribeItems = null;
       }
 
+      requestedLimit = Number(size) > 0 ? Number(size) : 0;
+
       unsubscribeItems = firebase.subscribeToItems(
-        user.uid,
-        (items) => {
-          this.items = items;
-          this.itemsLoading = false;
-          this.itemsError = '';
-          release();
-          this.resolvePendingForm();
-        },
+        this.user.uid,
+        (items, meta) => this.handleItemsSnapshot(items, meta),
         (error) => {
           console.error('[collection]', error);
           this.itemsLoading = false;
+          this.itemsLoadingMore = false;
           this.itemsError = this.describeFirestoreError(error);
-          release();
+          if (resolveItems) {
+            resolveItems();
+            resolveItems = null;
+          }
+        },
+        { pageSize: requestedLimit },
+      );
+    },
+
+    handleItemsSnapshot(items, meta = {}) {
+      const list = Array.isArray(items) ? items : [];
+
+      this.items = list;
+      this.itemsLoading = false;
+      this.itemsLoadingMore = false;
+      this.itemsError = '';
+
+      /* Counters and deep-link lookups are derived from the loaded window. */
+      this.collectionCounts = {};
+
+      if (this.itemsSyncMode || meta.limit === 0) {
+        this.itemsComplete = true;
+        this.itemsTotal = list.length;
+      } else {
+        const reachedTotal =
+          this.itemsTotal > 0 && list.length >= this.itemsTotal;
+        this.itemsComplete = !meta.hasMore || reachedTotal;
+      }
+
+      this.syncDetailFallback();
+      this.resolvePendingForm();
+
+      if (resolveItems) {
+        resolveItems();
+        resolveItems = null;
+      }
+    },
+
+    /** True when another page is worth requesting. */
+    itemsNeedMore() {
+      return !(this.itemsTotal > 0 && this.items.length >= this.itemsTotal);
+    },
+
+    /** Loads the next page (scroll sentinel or the "load more" button). */
+    loadMore() {
+      if (!firebase || !this.user) return;
+      if (this.route.name !== 'home') return;
+      if (this.itemsLoading || this.itemsLoadingMore) return;
+      if (this.itemsComplete || this.itemsSyncMode) return;
+      if (!this.itemsNeedMore()) {
+        this.itemsComplete = true;
+        return;
+      }
+
+      this.itemsLoadingMore = true;
+      const next =
+        Math.max(requestedLimit, this.items.length) + LIMITS.pageSize;
+
+      this.subscribeItems(next);
+    },
+
+    /**
+     * Hybrid mode: search and filters run over the whole garage, so the next
+     * snapshot brings every car and the existing client-side filtering stays
+     * exact.
+     */
+    syncAllItems() {
+      if (!firebase || !this.user) return;
+      if (this.itemsSyncMode) return;
+      if (!this.hasFilters()) return;
+
+      restoreLimit = requestedLimit || LIMITS.pageSize;
+      this.itemsSyncMode = true;
+
+      /* Everything is already in memory (short garage or fully scrolled),
+         so the search needs no extra query at all. */
+      if (this.itemsComplete && !this.itemsNeedMore()) return;
+
+      this.itemsLoadingMore = true;
+      this.subscribeItems(0);
+    },
+
+    /** Returns to paginated loading once the search and filters are cleared. */
+    restorePagination() {
+      if (!this.itemsSyncMode) return;
+      if (this.hasFilters()) return;
+      if (!firebase || !this.user) return;
+
+      this.itemsSyncMode = false;
+      this.itemsLoadingMore = true;
+      this.subscribeItems(Math.max(LIMITS.pageSize, restoreLimit));
+    },
+
+    scheduleSyncCheck(delay = 0) {
+      clearTimeout(syncTimer);
+      syncTimer = setTimeout(() => {
+        syncTimer = 0;
+        if (this.hasFilters()) this.syncAllItems();
+        else this.restorePagination();
+      }, Math.max(0, Number(delay) || 0));
+    },
+
+    /** Total cars on the server (aggregation query, ~1 read). */
+    async refreshItemsTotal() {
+      if (!firebase || !this.user) return;
+
+      try {
+        const total = await firebase.countItems(this.user.uid);
+        this.itemsTotal = Number(total) || 0;
+        if (
+          !this.itemsSyncMode &&
+          this.itemsTotal > 0 &&
+          this.items.length >= this.itemsTotal
+        ) {
+          this.itemsComplete = true;
+        }
+      } catch (error) {
+        console.warn('[collection] count failed:', error);
+      }
+    },
+
+    /* ------------------------------------------------------------------ */
+    /* Scroll sentinel                                                    */
+    /* ------------------------------------------------------------------ */
+
+    observeSentinel(element) {
+      if (!element) return;
+      if (typeof IntersectionObserver === 'undefined') return;
+
+      if (sentinelObserver) sentinelObserver.disconnect();
+
+      sentinelObserver = new IntersectionObserver(
+        (entries) => {
+          if (!entries.some((entry) => entry.isIntersecting)) return;
+          this.loadMore();
+        },
+        { rootMargin: '200px 0px' },
+      );
+
+      sentinelObserver.observe(element);
+    },
+
+    startCollections(user) {
+      if (!firebase || !user) return;
+
+      this.collectionsLoading = true;
+      this.collectionsError = '';
+
+      if (unsubscribeCollections) {
+        unsubscribeCollections();
+        unsubscribeCollections = null;
+      }
+
+      unsubscribeCollections = firebase.subscribeToCollections(
+        user.uid,
+        (collections) => {
+          this.collections = collections;
+          this.collectionsLoading = false;
+          this.collectionsError = '';
+
+          /* Drop filters that point at collections removed elsewhere. */
+          const valid = new Set(collections.map((entry) => entry.id));
+          this.selectedCollections = this.selectedCollections.filter(
+            (id) => !id || valid.has(id),
+          );
+        },
+        (error) => {
+          console.error('[collections]', error);
+          this.collectionsLoading = false;
+          this.collectionsError = this.describeFirestoreError(error);
         },
       );
+    },
+
+    stopCollections() {
+      if (unsubscribeCollections) {
+        unsubscribeCollections();
+        unsubscribeCollections = null;
+      }
+    },
+
+    retryCollections() {
+      if (!this.user) return;
+      this.startCollections(this.user);
     },
 
     stopItems() {
@@ -495,6 +775,26 @@ export function createApp() {
         unsubscribeItems();
         unsubscribeItems = null;
       }
+      this.stopCollections();
+
+      requestedLimit = 0;
+      restoreLimit = 0;
+
+      /* The sentinel observer lives on the home view and is reused after a
+         logout/login cycle; only `destroy()` disconnects it. */
+      clearTimeout(syncTimer);
+      clearTimeout(searchTimer);
+      syncTimer = 0;
+      searchTimer = 0;
+
+      this.itemsLoadingMore = false;
+      this.itemsComplete = false;
+      this.itemsSyncMode = false;
+      this.itemsTotal = 0;
+      this.collectionCounts = {};
+      this.detailFallback = null;
+      this.detailLoading = false;
+
       if (resolveItems) {
         resolveItems();
         resolveItems = null;
@@ -514,32 +814,225 @@ export function createApp() {
       return String(this.search || '').trim().length > 0;
     },
 
+    hasFilters() {
+      return (
+        this.hasSearch() ||
+        Boolean(this.specialOnly) ||
+        this.selectedCollections.length > 0
+      );
+    },
+
     clearSearch() {
       this.search = '';
+      clearTimeout(syncTimer);
+      syncTimer = 0;
+      this.restorePagination();
+    },
+
+    clearFilters() {
+      this.search = '';
+      this.specialOnly = false;
+      this.selectedCollections = [];
+      clearTimeout(syncTimer);
+      clearTimeout(searchTimer);
+      syncTimer = 0;
+      searchTimer = 0;
+      this.restorePagination();
+    },
+
+    /** Label shown on the collection multi-select trigger. */
+    collectionFilterLabel() {
+      const selected = this.selectedCollections;
+      if (!selected.length) return this.t('filterCollectionsAll');
+      if (selected.length === 1) {
+        const id = String(selected[0] || '');
+        if (!id) return this.t('collectionSelectNone');
+        const collection = this.collections.find((entry) => entry.id === id);
+        return collection ? this.collectionLabel(collection) : this.t('filterCollectionsAll');
+      }
+      return this.t('filterCollectionsCount', { count: selected.length });
+    },
+
+    isCollectionSelected(id) {
+      return this.selectedCollections.includes(String(id || ''));
+    },
+
+    toggleCollectionFilter(id) {
+      const value = String(id || '');
+      if (value && !this.collections.some((entry) => entry.id === value)) return;
+
+      const selected = new Set(this.selectedCollections);
+      if (selected.has(value)) selected.delete(value);
+      else selected.add(value);
+
+      this.selectedCollections = [...selected];
+    },
+
+    clearCollectionFilter() {
+      this.selectedCollections = [];
     },
 
     filteredItems() {
       const term = normalizeTerm(this.search);
-      if (!term) return this.items;
+      const specialOnly = Boolean(this.specialOnly);
+      const collectionFilter = new Set(this.selectedCollections);
+      const hasCollectionFilter = collectionFilter.size > 0;
 
-      return this.items.filter(
-        (item) =>
+      return this.items.filter((item) => {
+        if (specialOnly && !item.specialEdition) return false;
+        if (hasCollectionFilter && !collectionFilter.has(String(item.collectionId || ''))) {
+          return false;
+        }
+        if (!term) return true;
+
+        return (
           normalizeTerm(item.name).includes(term) ||
-          normalizeTerm(item.description).includes(term),
-      );
+          normalizeTerm(item.description).includes(term) ||
+          normalizeTerm(this.itemCollectionLabel(item)).includes(term)
+        );
+      });
     },
 
+    /**
+     * Header summary. Without filters it reports the whole garage (server
+     * count, no extra query). With filters it reports how many cars match —
+     * exact because the hybrid mode keeps the full list in memory.
+     */
     garageSummary() {
-      const count = this.items.length;
-      if (count === 0) return this.t('carsInGarageZero');
-      if (count === 1) return this.t('carsInGarageOne');
-      return this.t('carsInGarageOther', { count });
+      const total = this.itemsTotal > 0 ? this.itemsTotal : this.items.length;
+
+      if (this.hasFilters()) {
+        /* The count is only trustworthy once the full list is in memory. */
+        if (!this.itemsSyncMode || this.itemsLoadingMore) {
+          return this.t('carsFiltering');
+        }
+        return this.t('carsFilteredCount', {
+          count: this.filteredItems().length,
+          total: total || this.filteredItems().length,
+        });
+      }
+
+      if (total === 0) return this.t('carsInGarageZero');
+      if (total === 1) return this.t('carsInGarageOne');
+      return this.t('carsInGarageOther', { count: total });
     },
 
     detailItem() {
       if (this.route.name !== 'details') return null;
       const id = this.route.params?.id;
-      return this.items.find((item) => item.id === id) || null;
+      if (!id) return null;
+      return (
+        this.items.find((item) => item.id === id) || this.detailFallback || null
+      );
+    },
+
+    /**
+     * Deep link support: when the car is outside the loaded page, fetch it on
+     * its own (a single document read).
+     */
+    async loadItemForDetails(id) {
+      if (!id) return;
+      if (this.route.name !== 'details' || this.route.params?.id !== id) return;
+      if (this.items.some((item) => item.id === id)) {
+        this.detailLoading = false;
+        return;
+      }
+      if (!firebase || !this.user || this.itemsLoading) return;
+      if (detailLookups.has(id)) return;
+
+      detailLookups.add(id);
+      this.detailLoading = true;
+
+      try {
+        const item = await firebase.getItemById(this.user.uid, id);
+        if (this.route.name !== 'details' || this.route.params?.id !== id) return;
+        this.detailFallback = item || null;
+      } catch (error) {
+        console.error('[collection] detail lookup failed:', error);
+        this.detailFallback = null;
+      } finally {
+        detailLookups.delete(id);
+        if (this.route.name === 'details' && this.route.params?.id === id) {
+          this.detailLoading = false;
+        }
+      }
+    },
+
+    /** Drops the fetched fallback as soon as the item joins the loaded page. */
+    syncDetailFallback() {
+      if (this.route.name !== 'details') return;
+      const id = this.route.params?.id;
+      if (!id) return;
+      if (this.items.some((item) => item.id === id)) {
+        this.detailFallback = null;
+        return;
+      }
+      if (!this.detailLoading) this.loadItemForDetails(id);
+    },
+
+    /**
+     * Loads exact per-collection counters when the grid is paginated, so the
+     * filter dropdown is never misleading. Cheap aggregation queries.
+     */
+    async loadCollectionCounts() {
+      if (!firebase || !this.user) return;
+      if (this.itemsComplete || this.itemsSyncMode) return;
+
+      try {
+        const result = await firebase.countItemsByCollection(
+          this.user.uid,
+          this.collections.map((entry) => entry.id),
+        );
+        this.collectionCounts = result.counts || {};
+        if (Number(result.total) > 0) this.itemsTotal = Number(result.total);
+      } catch (error) {
+        console.warn('[collections] counts failed:', error);
+      }
+    },
+
+    /** Resolves the managed collection linked to a car. */
+    collectionFor(item) {
+      const id = String(item?.collectionId || '');
+      if (!id) return null;
+      return this.collections.find((collection) => collection.id === id) || null;
+    },
+
+    /** "Name · Year" label used in selects, cards and details. */
+    collectionLabel(collection) {
+      if (!collection) return '';
+      const name = String(collection.name || '').trim();
+      const year = Number(collection.year) || 0;
+      if (!name) return '';
+      return year ? `${name} · ${year}` : name;
+    },
+
+    itemCollectionLabel(item) {
+      return this.collectionLabel(this.collectionFor(item));
+    },
+
+    collectionCarCount(collectionId) {
+      const id = String(collectionId || '');
+
+      /* While paginated the loaded window is incomplete, so prefer the exact
+         counters fetched from the server when the dropdown opens. */
+      const counts = this.collectionCounts || {};
+      if (Object.prototype.hasOwnProperty.call(counts, id)) {
+        return Number(counts[id]) || 0;
+      }
+
+      return this.items.filter(
+        (item) => String(item.collectionId || '') === id,
+      ).length;
+    },
+
+    collectionCountLabel(count) {
+      const value = Number(count) || 0;
+      if (value === 1) return this.t('collectionCarCountOne');
+      return this.t('collectionCarCountOther', { count: value });
+    },
+
+    collectionFormYearMax() {
+      return new Date().getFullYear() + 1;
     },
 
     carPhotoAlt(name) {
@@ -595,6 +1088,7 @@ export function createApp() {
       this.deleting = true;
       try {
         await firebase.deleteItem(target.id);
+        void this.refreshItemsTotal();
         this.deleteOpen = false;
         this.deleteTarget = null;
         this.showToast(this.t('carDeleted'));
@@ -606,6 +1100,157 @@ export function createApp() {
         this.showToast(this.describeFirestoreError(error), 'error');
       } finally {
         this.deleting = false;
+      }
+    },
+
+    /* ------------------------------------------------------------------ */
+    /* Managed collections                                                */
+    /* ------------------------------------------------------------------ */
+
+    openCollectionForm(collection = null, options = {}) {
+      this.collectionForm = {
+        open: true,
+        mode: collection?.id ? 'edit' : 'new',
+        id: collection?.id || null,
+        name: collection?.name || '',
+        year: Number(collection?.year) || this.currentYear(),
+        returnTo: options.returnTo || 'manage',
+        saving: false,
+        errors: {},
+        error: '',
+      };
+    },
+
+    closeCollectionForm() {
+      if (this.collectionForm.saving) return;
+      this.collectionForm.open = false;
+    },
+
+    validateCollectionForm() {
+      const errors = {};
+      const name = String(this.collectionForm.name || '').trim();
+      const rawYear = String(this.collectionForm.year ?? '').trim();
+      const year = Number(rawYear);
+      const maxYear = this.collectionFormYearMax();
+
+      if (!name) errors.name = this.t('collectionNameRequired');
+      else if (name.length > LIMITS.collectionName) {
+        errors.name = this.t('collectionNameMaxLength', { max: LIMITS.collectionName });
+      }
+
+      if (!rawYear || !Number.isInteger(year)) {
+        errors.year = this.t('collectionYearRequired');
+      } else if (year < LIMITS.collectionYearMin || year > maxYear) {
+        errors.year = this.t('collectionYearInvalid', {
+          min: LIMITS.collectionYearMin,
+          max: maxYear,
+        });
+      }
+
+      return errors;
+    },
+
+    async submitCollectionForm() {
+      if (this.collectionForm.saving) return;
+
+      this.collectionForm.error = '';
+      const errors = this.validateCollectionForm();
+      this.collectionForm.errors = errors;
+      if (Object.keys(errors).length) return;
+
+      if (!firebase) {
+        this.collectionForm.error = this.t('errorFirebaseNotConfigured');
+        return;
+      }
+
+      if (!this.user) {
+        this.collectionForm.error = this.t('sessionExpired');
+        return;
+      }
+
+      const returnTo = this.collectionForm.returnTo;
+      this.collectionForm.saving = true;
+
+      try {
+        const payload = {
+          name: String(this.collectionForm.name || '').trim(),
+          year: Number(this.collectionForm.year),
+        };
+
+        if (this.collectionForm.mode === 'edit' && this.collectionForm.id) {
+          await firebase.updateCollection(this.collectionForm.id, payload);
+          this.showToast(this.t('collectionUpdated'));
+        } else {
+          const id = await firebase.createCollection({
+            userId: this.user.uid,
+            ...payload,
+          });
+          this.showToast(this.t('collectionCreated'));
+          if (returnTo === 'form') this.form.collectionId = id;
+        }
+
+        this.collectionForm.saving = false;
+        this.collectionForm.open = false;
+      } catch (error) {
+        console.error('[collections] save failed:', error);
+        this.collectionForm.error = this.describeFirestoreError(error);
+        this.collectionForm.saving = false;
+      }
+    },
+
+    requestDeleteCollection(collection) {
+      if (!collection) return;
+      this.collectionDelete = { open: true, target: collection, deleting: false };
+    },
+
+    cancelDeleteCollection() {
+      if (this.collectionDelete.deleting) return;
+      this.collectionDelete = { open: false, target: null, deleting: false };
+    },
+
+    deleteCollectionMessage() {
+      const target = this.collectionDelete.target;
+      if (!target) return '';
+      const count = this.collectionCarCount(target.id);
+      const name = String(target.name || '');
+
+      if (count > 0) {
+        return this.t('collectionDeleteInUseMessage', { name, count });
+      }
+
+      return this.t('collectionDeleteMessage', { name });
+    },
+
+    async confirmDeleteCollection() {
+      const target = this.collectionDelete.target;
+      if (!target || this.collectionDelete.deleting) return;
+
+      if (!firebase) {
+        this.showToast(this.t('errorFirebaseNotConfigured'), 'error');
+        return;
+      }
+
+      this.collectionDelete.deleting = true;
+
+      try {
+        const linkedIds = this.items
+          .filter((item) => item.collectionId === target.id)
+          .map((item) => item.id);
+
+        if (linkedIds.length) {
+          await firebase.unlinkCollectionFromItems(linkedIds);
+        }
+
+        await firebase.deleteCollection(target.id);
+
+        if (this.form.collectionId === target.id) this.form.collectionId = '';
+
+        this.collectionDelete = { open: false, target: null, deleting: false };
+        this.showToast(this.t('collectionDeleted'));
+      } catch (error) {
+        console.error('[collections] delete failed:', error);
+        this.collectionDelete.deleting = false;
+        this.showToast(this.describeFirestoreError(error), 'error');
       }
     },
 
@@ -627,6 +1272,8 @@ export function createApp() {
       this.form.name = '';
       this.form.description = '';
       this.form.imageBase64 = '';
+      this.form.collectionId = '';
+      this.form.specialEdition = false;
       this.formErrors = {};
       this.formError = '';
       this.formLoading = false;
@@ -649,7 +1296,20 @@ export function createApp() {
 
       if (this.route.name !== 'form' || this.route.params?.id !== id) return;
 
-      const item = this.items.find((entry) => entry.id === id);
+      let item = this.items.find((entry) => entry.id === id);
+
+      /* Deep link to a car outside the paginated window. */
+      if (!item && firebase && this.user && !detailLookups.has(id)) {
+        detailLookups.add(id);
+        try {
+          item = await firebase.getItemById(this.user.uid, id);
+        } catch (error) {
+          console.error('[form] item lookup failed:', error);
+        } finally {
+          detailLookups.delete(id);
+        }
+        if (this.route.name !== 'form' || this.route.params?.id !== id) return;
+      }
 
       if (!item) {
         this.formNotFound = true;
@@ -668,22 +1328,22 @@ export function createApp() {
       this.form.name = item.name;
       this.form.description = item.description;
       this.form.imageBase64 = item.imageBase64;
+      this.form.collectionId = String(item.collectionId || '');
+      this.form.specialEdition = Boolean(item.specialEdition);
       this.formLoading = false;
       this.formNotFound = false;
     },
 
-    /** Called when the collection snapshot arrives for a pending edit route. */
+    /** Called when the items snapshot arrives for a pending edit route. */
     resolvePendingForm() {
       if (this.route.name !== 'form') return;
       const id = this.route.params?.id;
       if (!id || !this.formLoading) return;
 
+      /* Absence is handled by `loadItemForForm` (which falls back to a single
+         document read), so a partial page never reports "not found". */
       const item = this.items.find((entry) => entry.id === id);
       if (item) this.fillForm(item);
-      else {
-        this.formNotFound = true;
-        this.formLoading = false;
-      }
     },
 
     validateForm() {
@@ -696,8 +1356,7 @@ export function createApp() {
         errors.name = this.t('validatorCarNameMaxLength', { max: LIMITS.name });
       }
 
-      if (!description) errors.description = this.t('validatorDescriptionRequired');
-      else if (description.length > LIMITS.description) {
+      if (description.length > LIMITS.description) {
         errors.description = this.t('validatorDescriptionMaxLength', {
           max: LIMITS.description,
         });
@@ -733,6 +1392,8 @@ export function createApp() {
           name: String(this.form.name || '').trim(),
           description: String(this.form.description || '').trim(),
           imageBase64: this.form.imageBase64,
+          collectionId: String(this.form.collectionId || ''),
+          specialEdition: Boolean(this.form.specialEdition),
         };
 
         if (this.formMode === 'edit' && this.form.id) {
@@ -740,6 +1401,7 @@ export function createApp() {
           this.showToast(this.t('carUpdated'));
         } else {
           await firebase.createItem({ userId: this.user.uid, ...payload });
+          void this.refreshItemsTotal();
           this.showToast(this.t('carAdded'));
         }
 

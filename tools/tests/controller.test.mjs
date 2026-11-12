@@ -32,6 +32,21 @@ test('createApp exposes the state the HTML binds to', () => {
     'toast',
     'route',
     'items',
+    'collections',
+    'collectionsLoading',
+    'collectionsError',
+    'specialOnly',
+    'selectedCollections',
+    'collectionFilterOpen',
+    'itemsLoadingMore',
+    'itemsComplete',
+    'itemsSyncMode',
+    'itemsTotal',
+    'collectionCounts',
+    'detailFallback',
+    'detailLoading',
+    'collectionForm',
+    'collectionDelete',
     'limits',
     'locales',
     'palettes',
@@ -74,7 +89,7 @@ test('every state root used in index.html exists on the component', () => {
 
   /* Loop variables from x-for and globals available inside the expressions. */
   const allowed = new Set([
-    'item', 'entry', 'n', 'Math', 'window', 'document', 'navigator',
+    'item', 'entry', 'collection', 'n', 'Math', 'window', 'document', 'navigator',
     'Object', 'JSON', 'Number', 'String', 'Intl', 'URLSearchParams',
   ]);
 
@@ -124,6 +139,18 @@ test('the documented method list matches the component', () => {
     'cropWheel', 'updateCropZoom', 'resetCrop', 'applyCrop', 'hideToast',
     'showToast', 'cancelOcrScan', 'setOcrAuto', 'ocrOnCropApplied',
     'ocrCleanup', 'init', 'destroy', 'handleRoute',
+    'hasFilters', 'clearFilters', 'collectionFor', 'collectionLabel',
+    'itemCollectionLabel', 'collectionCarCount', 'collectionCountLabel',
+    'collectionFilterLabel', 'isCollectionSelected', 'toggleCollectionFilter',
+    'clearCollectionFilter',
+    'collectionFormYearMax', 'openCollectionForm', 'closeCollectionForm',
+    'validateCollectionForm', 'submitCollectionForm', 'requestDeleteCollection',
+    'cancelDeleteCollection', 'deleteCollectionMessage', 'confirmDeleteCollection',
+    'startCollections', 'stopCollections', 'retryCollections',
+    'startItems', 'stopItems', 'subscribeItems', 'handleItemsSnapshot',
+    'itemsNeedMore', 'loadMore', 'syncAllItems', 'restorePagination',
+    'scheduleSyncCheck', 'refreshItemsTotal', 'observeSentinel',
+    'loadItemForDetails', 'syncDetailFallback', 'loadCollectionCounts',
   ];
 
   for (const name of methods) {
@@ -181,16 +208,16 @@ test('register mode requires a name', () => {
   assert.equal(app.validateAuth().name, 'validatorNameRequired');
 });
 
-test('form validation covers name, description and photo', () => {
+test('form validation covers name and photo, description is optional', () => {
   const app = createComponent();
   app.form = { id: null, name: '', description: '', imageBase64: '' };
 
   const errors = app.validateForm();
   assert.equal(errors.name, 'validatorCarNameRequired');
-  assert.equal(errors.description, 'validatorDescriptionRequired');
+  assert.equal(errors.description, undefined);
   assert.equal(errors.image, 'errorCarPhotoRequired');
 
-  app.form = { id: null, name: 'ACURA NSX', description: 'HW', imageBase64: 'abc' };
+  app.form = { id: null, name: 'ACURA NSX', description: '', imageBase64: 'abc' };
   assert.deepEqual(app.validateForm(), {});
 });
 
@@ -207,11 +234,46 @@ test('garage summary counts the collection', () => {
   assert.equal(app.garageSummary(), 'carsInGarageOther');
 });
 
-test('search is case and accent insensitive over name and description', () => {
+test('garage summary follows the active filters', () => {
   const app = createComponent();
   app.items = [
-    { id: '1', name: 'Acura NSX', description: "HW THE '90S · 2/10" },
-    { id: '2', name: 'Fusca', description: 'Série antiga' },
+    { id: '1', name: 'Acura NSX', description: '', collectionId: 'c1', specialEdition: false },
+    { id: '2', name: 'Fusca', description: '', collectionId: '', specialEdition: false },
+    { id: '3', name: 'Deora', description: '', collectionId: '', specialEdition: true },
+  ];
+  app.itemsTotal = 40;
+
+  /* No filters: the whole garage. */
+  assert.equal(app.garageSummary(), 'carsInGarageOther');
+
+  /* Filters active but the full list is still loading: never show a
+     partial count. */
+  app.search = 'a';
+  assert.equal(app.garageSummary(), 'carsFiltering');
+
+  app.itemsSyncMode = true;
+  app.itemsLoadingMore = false;
+  assert.equal(app.garageSummary(), 'carsFilteredCount');
+
+  app.specialOnly = true;
+  assert.equal(app.garageSummary(), 'carsFilteredCount');
+
+  app.search = '';
+  app.specialOnly = false;
+  app.itemsSyncMode = false;
+  assert.equal(app.garageSummary(), 'carsInGarageOther');
+});
+
+test('search is case and accent insensitive over name, description and collection', () => {
+  const app = createComponent();
+  app.collections = [
+    { id: 'c1', name: "HW The '90s", year: 1998 },
+    { id: 'c2', name: 'Série antiga', year: 1985 },
+  ];
+  app.items = [
+    { id: '1', name: 'Acura NSX', description: "HW THE '90S · 2/10", collectionId: 'c1', specialEdition: true },
+    { id: '2', name: 'Fusca', description: 'Série antiga', collectionId: 'c2', specialEdition: false },
+    { id: '3', name: 'Twin Mill', description: '', collectionId: '', specialEdition: true },
   ];
 
   app.search = 'nsx';
@@ -220,8 +282,14 @@ test('search is case and accent insensitive over name and description', () => {
   app.search = 'serie';
   assert.deepEqual(app.filteredItems().map((item) => item.id), ['2']);
 
+  app.search = 'antiga';
+  assert.deepEqual(app.filteredItems().map((item) => item.id), ['2']);
+
+  app.search = 'hw the';
+  assert.deepEqual(app.filteredItems().map((item) => item.id), ['1']);
+
   app.search = '   ';
-  assert.equal(app.filteredItems().length, 2);
+  assert.equal(app.filteredItems().length, 3);
 
   app.search = 'nada';
   assert.equal(app.hasSearch(), true);
@@ -230,6 +298,135 @@ test('search is case and accent insensitive over name and description', () => {
   app.clearSearch();
   assert.equal(app.hasSearch(), false);
   assert.equal(app.hasItems(), true);
+});
+
+test('special edition filter combines with the search term', () => {
+  const app = createComponent();
+  app.collections = [{ id: 'c1', name: 'HW The 90s', year: 1998 }];
+  app.items = [
+    { id: '1', name: 'Acura NSX', description: '', collectionId: 'c1', specialEdition: true },
+    { id: '2', name: 'Fusca', description: '', collectionId: 'c1', specialEdition: false },
+    { id: '3', name: 'Twin Mill', description: '', collectionId: '', specialEdition: true },
+  ];
+
+  app.specialOnly = true;
+  assert.deepEqual(app.filteredItems().map((item) => item.id), ['1', '3']);
+
+  app.search = 'acura';
+  assert.deepEqual(app.filteredItems().map((item) => item.id), ['1']);
+
+  assert.equal(app.hasFilters(), true);
+  app.clearFilters();
+  assert.equal(app.specialOnly, false);
+  assert.equal(app.search, '');
+  assert.equal(app.hasFilters(), false);
+  assert.equal(app.filteredItems().length, 3);
+});
+
+test('collection multi-select filters over one or more collections and uncategorised cars', () => {
+  const app = createComponent();
+  app.collections = [
+    { id: 'c1', name: 'HW The 90s', year: 1998 },
+    { id: 'c2', name: 'Retro Series', year: 1985 },
+  ];
+  app.items = [
+    { id: '1', name: 'Acura NSX', description: '', collectionId: 'c1', specialEdition: false },
+    { id: '2', name: 'Fusca', description: '', collectionId: 'c2', specialEdition: false },
+    { id: '3', name: 'Twin Mill', description: '', collectionId: '', specialEdition: false },
+    { id: '4', name: 'Deora', description: '', collectionId: 'c2', specialEdition: true },
+  ];
+
+  assert.equal(app.collectionFilterLabel(), 'filterCollectionsAll');
+
+  app.toggleCollectionFilter('c1');
+  assert.equal(app.isCollectionSelected('c1'), true);
+  assert.deepEqual(app.filteredItems().map((item) => item.id), ['1']);
+  assert.equal(app.collectionFilterLabel(), 'HW The 90s · 1998');
+
+  app.toggleCollectionFilter('c2');
+  assert.deepEqual(app.filteredItems().map((item) => item.id), ['1', '2', '4']);
+  assert.equal(app.collectionFilterLabel(), 'filterCollectionsCount');
+
+  app.toggleCollectionFilter('c1');
+  assert.deepEqual(app.filteredItems().map((item) => item.id), ['2', '4']);
+
+  app.toggleCollectionFilter('');
+  assert.deepEqual(app.filteredItems().map((item) => item.id), ['2', '3', '4']);
+  assert.equal(app.hasFilters(), true);
+
+  app.clearCollectionFilter();
+  assert.equal(app.selectedCollections.length, 0);
+  assert.deepEqual(app.filteredItems().map((item) => item.id), ['1', '2', '3', '4']);
+
+  app.toggleCollectionFilter('');
+  assert.equal(app.collectionFilterLabel(), 'collectionSelectNone');
+  assert.deepEqual(app.filteredItems().map((item) => item.id), ['3']);
+  assert.equal(app.hasFilters(), true);
+
+  app.clearFilters();
+  assert.equal(app.selectedCollections.length, 0);
+  assert.equal(app.hasFilters(), false);
+});
+
+test('collection labels resolve from the managed list', () => {
+  const app = createComponent();
+  app.collections = [
+    { id: 'c1', name: 'HW The 90s', year: 1998 },
+    { id: 'c2', name: 'No year', year: 0 },
+  ];
+
+  assert.equal(app.collectionLabel(app.collections[0]), 'HW The 90s · 1998');
+  assert.equal(app.collectionLabel(app.collections[1]), 'No year');
+  assert.equal(app.collectionLabel(null), '');
+
+  const item = { id: '1', collectionId: 'c1' };
+  assert.equal(app.itemCollectionLabel(item), 'HW The 90s · 1998');
+  assert.equal(app.itemCollectionLabel({ id: '2', collectionId: '' }), '');
+  assert.equal(app.itemCollectionLabel({ id: '3', collectionId: 'missing' }), '');
+  assert.equal(app.collectionFor(item).id, 'c1');
+});
+
+test('collection car counts and delete messages follow the links', () => {
+  const app = createComponent();
+  app.collections = [{ id: 'c1', name: 'HW The 90s', year: 1998 }];
+  app.items = [
+    { id: '1', collectionId: 'c1' },
+    { id: '2', collectionId: 'c1' },
+    { id: '3', collectionId: '' },
+  ];
+
+  assert.equal(app.collectionCarCount('c1'), 2);
+  assert.equal(app.collectionCountLabel(1), 'collectionCarCountOne');
+
+  app.collectionDelete = { open: true, target: app.collections[0], deleting: false };
+  assert.equal(app.deleteCollectionMessage(), 'collectionDeleteInUseMessage');
+
+  app.items = [{ id: '3', collectionId: '' }];
+  assert.equal(app.deleteCollectionMessage(), 'collectionDeleteMessage');
+});
+
+test('collection validation requires a name and a valid year', () => {
+  const app = createComponent();
+
+  app.collectionForm = { name: '  ', year: '', returnTo: 'manage' };
+  let errors = app.validateCollectionForm();
+  assert.equal(errors.name, 'collectionNameRequired');
+  assert.equal(errors.year, 'collectionYearRequired');
+
+  app.collectionForm = { name: 'X'.repeat(81), year: 1998, returnTo: 'manage' };
+  errors = app.validateCollectionForm();
+  assert.equal(errors.name, 'collectionNameMaxLength');
+
+  app.collectionForm = { name: 'HW', year: 1900, returnTo: 'manage' };
+  errors = app.validateCollectionForm();
+  assert.equal(errors.year, 'collectionYearInvalid');
+
+  app.collectionForm = { name: 'HW', year: app.collectionFormYearMax() + 1, returnTo: 'manage' };
+  errors = app.validateCollectionForm();
+  assert.equal(errors.year, 'collectionYearInvalid');
+
+  app.collectionForm = { name: 'HW The 90s', year: 1998, returnTo: 'manage' };
+  assert.deepEqual(app.validateCollectionForm(), {});
 });
 
 test('detailItem only resolves on the details route', () => {
@@ -260,13 +457,20 @@ test('form titles follow the mode', () => {
 
 test('resetForm clears the form and the OCR panel', () => {
   const app = createComponent();
-  app.form = { id: 'x', name: 'A', description: 'B', imageBase64: 'C' };
+  app.form = { id: 'x', name: 'A', description: 'B', imageBase64: 'C', collectionId: 'c', specialEdition: true };
   app.formErrors = { name: 'erro' };
   app.formMode = 'edit';
 
   app.resetForm();
 
-  assert.deepEqual(app.form, { id: null, name: '', description: '', imageBase64: '' });
+  assert.deepEqual(app.form, {
+    id: null,
+    name: '',
+    description: '',
+    imageBase64: '',
+    collectionId: '',
+    specialEdition: false,
+  });
   assert.deepEqual(app.formErrors, {});
   assert.equal(app.formMode, 'new');
 });
@@ -380,6 +584,139 @@ test('formatDate returns an empty string for invalid values', () => {
 
   app.locale = 'en-CA';
   assert.match(app.formatDate(new Date('2024-03-05T12:00:00Z')), /2024/);
+});
+
+/* -------------------------------------------------------------------------- */
+/* Smart loading (pagination + hybrid mode)                                   */
+/* -------------------------------------------------------------------------- */
+
+test('a full page keeps loading, a short page completes the list', () => {
+  const app = createComponent();
+
+  app.handleItemsSnapshot(
+    Array.from({ length: 24 }, (_, index) => ({ id: `p${index}` })),
+    { limit: 24, hasMore: true },
+  );
+  assert.equal(app.items.length, 24);
+  assert.equal(app.itemsComplete, false);
+  assert.equal(app.itemsLoading, false);
+  assert.equal(app.itemsNeedMore(), true);
+
+  app.handleItemsSnapshot([{ id: 'p1' }], { limit: 24, hasMore: false });
+  assert.equal(app.itemsComplete, true);
+  assert.equal(app.itemsNeedMore(), true, 'total desconhecido ainda permite tentar');
+});
+
+test('reaching the server total completes the list even on a full page', () => {
+  const app = createComponent();
+  app.itemsTotal = 50;
+
+  app.handleItemsSnapshot(
+    Array.from({ length: 24 }, (_, index) => ({ id: `p${index}` })),
+    { limit: 24, hasMore: true },
+  );
+  assert.equal(app.itemsComplete, false);
+  assert.equal(app.itemsNeedMore(), true);
+
+  app.handleItemsSnapshot(
+    Array.from({ length: 48 }, (_, index) => ({ id: `p${index}` })),
+    { limit: 24, hasMore: true },
+  );
+  assert.equal(app.itemsComplete, false);
+
+  app.handleItemsSnapshot(
+    Array.from({ length: 50 }, (_, index) => ({ id: `p${index}` })),
+    { limit: 26, hasMore: true },
+  );
+  assert.equal(app.itemsComplete, true);
+  assert.equal(app.itemsNeedMore(), false);
+});
+
+test('the hybrid snapshot loads everything and settles the total', () => {
+  const app = createComponent();
+  app.itemsSyncMode = true;
+
+  app.handleItemsSnapshot([{ id: '1' }, { id: '2' }], { limit: 0, hasMore: false });
+
+  assert.equal(app.itemsComplete, true);
+  assert.equal(app.itemsTotal, 2);
+  assert.equal(app.itemsLoadingMore, false);
+});
+
+test('loadMore and the hybrid switch stay inert without a session', () => {
+  const app = createComponent();
+
+  /* No user / Firebase: every call is a safe no-op. */
+  assert.doesNotThrow(() => app.loadMore());
+  assert.doesNotThrow(() => app.syncAllItems());
+  assert.doesNotThrow(() => app.restorePagination());
+  assert.equal(app.itemsLoadingMore, false);
+  assert.equal(app.itemsSyncMode, false);
+
+  app.itemsComplete = true;
+  app.user = { uid: 'u1' };
+  assert.doesNotThrow(() => app.loadMore());
+  assert.equal(app.itemsLoadingMore, false);
+});
+
+test('syncAllItems only reacts to an active search or filter', () => {
+  const app = createComponent();
+  app.user = { uid: 'u1' };
+
+  app.syncAllItems();
+  assert.equal(app.itemsSyncMode, false);
+
+  app.search = 'fusca';
+  assert.equal(app.hasFilters(), true);
+
+  app.restorePagination();
+  assert.equal(app.itemsSyncMode, false);
+});
+
+test('garage summary prefers the server total', () => {
+  const app = createComponent();
+
+  app.items = [{ id: '1' }];
+  app.itemsTotal = 0;
+  assert.equal(app.garageSummary(), 'carsInGarageOne');
+
+  app.itemsTotal = 37;
+  assert.equal(app.garageSummary(), 'carsInGarageOther');
+
+  app.itemsTotal = 1;
+  assert.equal(app.garageSummary(), 'carsInGarageOne');
+});
+
+test('detailItem falls back to the single document fetch', () => {
+  const app = createComponent();
+
+  app.route = { name: 'details', path: '/collection/x', params: { id: 'x' } };
+  assert.equal(app.detailItem(), null);
+
+  app.detailFallback = { id: 'x', name: 'Fallback' };
+  assert.equal(app.detailItem().name, 'Fallback');
+
+  app.items = [{ id: 'x', name: 'Carregado' }];
+  assert.equal(app.detailItem().name, 'Carregado');
+});
+
+test('collection counters prefer the server aggregation when available', () => {
+  const app = createComponent();
+  app.items = [
+    { id: '1', collectionId: 'c1' },
+    { id: '2', collectionId: 'c1' },
+    { id: '3', collectionId: '' },
+  ];
+
+  assert.equal(app.collectionCarCount('c1'), 2);
+  assert.equal(app.collectionCarCount(''), 1);
+
+  app.collectionCounts = { c1: 12, '': 4 };
+  assert.equal(app.collectionCarCount('c1'), 12);
+  assert.equal(app.collectionCarCount(''), 4);
+
+  app.collectionCounts = {};
+  assert.equal(app.collectionCarCount('c1'), 2);
 });
 
 test('handleRoute stores a plain route and closes menus', () => {

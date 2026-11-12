@@ -508,6 +508,7 @@
 
             <nav class="ml-2 hidden items-center gap-1 md:flex" :aria-label="t('navCollection')">
               <a :href="link('/')" class="nav-link" :class="{ 'is-active': route.name === 'home' }" x-text="t('navCollection')"></a>
+              <a :href="link('/collections')" class="nav-link" :class="{ 'is-active': route.name === 'collections' }" x-text="t('navCollections')"></a>
               <a :href="link('/settings')" class="nav-link" :class="{ 'is-active': route.name === 'settings' }" x-text="t('navSettings')"></a>
             </nav>
           </div>
@@ -618,32 +619,125 @@
               </a>
             </div>
 
-            <div class="relative mt-6 max-w-xl">
-              <svg class="pointer-events-none absolute left-3.5 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                <circle cx="11" cy="11" r="7"></circle>
-                <path d="m20 20-3.5-3.5"></path>
-              </svg>
-              <input
-                type="search"
-                class="input text-base"
-                style="padding-left: 2.9rem; padding-right: 2.9rem"
-                x-model="search"
-                :placeholder="t('searchHint')"
-                :aria-label="t('searchLabel')"
-                autocomplete="off"
-              />
-              <button
-                type="button"
-                x-show="hasSearch()"
-                class="absolute right-2 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200"
-                @click="clearSearch()"
-                :title="t('clearSearch')"
-                :aria-label="t('clearSearch')"
-              >
-                <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                  <path d="M6 6l12 12M18 6 6 18"></path>
+            <div class="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div class="relative w-full max-w-xl">
+                <svg class="pointer-events-none absolute left-3.5 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <circle cx="11" cy="11" r="7"></circle>
+                  <path d="m20 20-3.5-3.5"></path>
                 </svg>
-              </button>
+                <input
+                  type="search"
+                  class="input text-base"
+                  style="padding-left: 2.9rem; padding-right: 2.9rem"
+                  x-model="search"
+                  :placeholder="t('searchHint')"
+                  :aria-label="t('searchLabel')"
+                  autocomplete="off"
+                />
+                <button
+                  type="button"
+                  x-show="hasFilters()"
+                  class="absolute right-2 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+                  @click="clearFilters()"
+                  :title="t('clearSearch')"
+                  :aria-label="t('clearSearch')"
+                >
+                  <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <path d="M6 6l12 12M18 6 6 18"></path>
+                  </svg>
+                </button>
+              </div>
+
+              <div class="flex flex-wrap items-center gap-2.5">
+                <label class="flex cursor-pointer items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 transition hover:border-slate-300 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-slate-600">
+                  <input
+                    type="checkbox"
+                    class="h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
+                    x-model="specialOnly"
+                  />
+                  <img src="assets/icon/th_icon.png" alt="" class="h-4 w-4" />
+                  <span x-text="t('filterSpecialOnly')"></span>
+                </label>
+
+                <div class="relative w-full sm:w-auto" @click.outside="collectionFilterOpen = false" @keydown.escape.window="collectionFilterOpen = false">
+                  <button
+                    type="button"
+                    class="btn-secondary btn-sm w-full justify-between sm:w-auto"
+                    @click="collectionFilterOpen = !collectionFilterOpen"
+                    :aria-expanded="collectionFilterOpen"
+                    :aria-label="t('filterCollections')"
+                  >
+                    <span class="flex min-w-0 items-center gap-2">
+                      <svg class="h-4 w-4 flex-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+                        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z"></path>
+                      </svg>
+                      <span class="truncate" x-text="collectionFilterLabel()"></span>
+                      <span
+                        x-show="selectedCollections.length"
+                        class="rounded-full bg-brand-600 px-1.5 py-0.5 text-[10px] font-bold leading-none text-white"
+                        x-text="selectedCollections.length || ''"
+                      ></span>
+                    </span>
+                    <svg class="h-4 w-4 flex-none transition" :class="{ 'rotate-180': collectionFilterOpen }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                      <path d="m6 9 6 6 6-6"></path>
+                    </svg>
+                  </button>
+
+                  <div
+                    x-show="collectionFilterOpen"
+                    x-cloak
+                    x-transition
+                    class="absolute left-0 top-full z-30 mt-2 w-full overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl dark:border-slate-700 dark:bg-slate-900 sm:left-auto sm:right-0 sm:w-72"
+                  >
+                    <p class="border-b border-slate-100 px-3 py-2 text-[11px] font-bold uppercase tracking-wide text-slate-400 dark:border-slate-800 dark:text-slate-500" x-text="t('filterCollections')"></p>
+
+                    <div class="max-h-64 overflow-y-auto p-1.5">
+                      <template x-for="collection in collections" :key="collection.id">
+                        <label class="flex cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 dark:text-slate-300 dark:hover:bg-slate-800/60">
+                          <input
+                            type="checkbox"
+                            class="h-4 w-4 flex-none rounded border-slate-300 text-brand-600 focus:ring-brand-500"
+                            :checked="isCollectionSelected(collection.id)"
+                            @change="toggleCollectionFilter(collection.id)"
+                          />
+                          <span class="min-w-0 flex-1 truncate" x-text="collectionLabel(collection)"></span>
+                          <span class="text-[10px] tabular-nums text-slate-400 dark:text-slate-500" x-text="collectionCarCount(collection.id)"></span>
+                        </label>
+                      </template>
+
+                      <label class="flex cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 dark:text-slate-300 dark:hover:bg-slate-800/60">
+                        <input
+                          type="checkbox"
+                          class="h-4 w-4 flex-none rounded border-slate-300 text-brand-600 focus:ring-brand-500"
+                          :checked="isCollectionSelected('')"
+                          @change="toggleCollectionFilter('')"
+                        />
+                        <span class="min-w-0 flex-1 truncate" x-text="t('collectionSelectNone')"></span>
+                        <span class="text-[10px] tabular-nums text-slate-400 dark:text-slate-500" x-text="collectionCarCount('')"></span>
+                      </label>
+
+                      <p x-show="!collections.length" class="px-2.5 py-2 text-[11px] leading-relaxed text-slate-400 dark:text-slate-500" x-text="t('collectionEmptyTitle')"></p>
+                    </div>
+
+                    <div x-show="selectedCollections.length" class="border-t border-slate-100 p-1.5 dark:border-slate-800">
+                      <button
+                        type="button"
+                        class="w-full rounded-lg px-2.5 py-2 text-left text-xs font-semibold text-brand-700 transition hover:bg-brand-50 dark:text-brand-300 dark:hover:bg-brand-950/40"
+                        @click="clearCollectionFilter()"
+                        x-text="t('filterCollectionsClear')"
+                      ></button>
+                    </div>
+                  </div>
+                </div>
+
+                <a :href="link('/collections')" class="btn-secondary btn-sm">
+                  <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                    <path d="M4 6h16M4 12h16M4 18h10"></path>
+                  </svg>
+                  <span x-text="t('collectionManage')"></span>
+                </a>
+              </div>
             </div>
 
             <!-- Loading skeleton -->
@@ -709,7 +803,7 @@
               </div>
               <h2 class="mt-5 text-xl font-extrabold tracking-tight" x-text="t('noSearchResultsTitle')"></h2>
               <p class="mx-auto mt-2 max-w-md text-sm text-slate-500 dark:text-slate-400" x-text="t('noSearchResultsDescription')"></p>
-              <button type="button" class="btn-secondary mt-5" @click="clearSearch()" x-text="t('clearSearch')"></button>
+              <button type="button" class="btn-secondary mt-5" @click="clearFilters()" x-text="t('clearSearch')"></button>
             </div>
 
             <!-- Cards -->
@@ -730,6 +824,13 @@
                       class="h-full w-full object-cover transition duration-500 group-hover:scale-[1.04]"
                       loading="lazy"
                     />
+                    <img
+                      x-show="item.specialEdition"
+                      src="assets/icon/th_icon.png"
+                      :alt="t('specialEditionLabel')"
+                      :title="t('specialEditionLabel')"
+                      class="pointer-events-none absolute bottom-2 right-2 h-8 w-8 drop-shadow"
+                    />
                   </div>
 
                   <!-- Bloco de Texto: Conteúdo flexível à direita, com truncagem para não vazar -->
@@ -741,12 +842,64 @@
                           <path d="m9 5 7 7-7 7"></path>
                         </svg>
                       </div>
-                      <!-- Descrição limitada a 3 linhas para respeitar o container e evitar transbordamento -->
-                      <p class="mt-1.5 line-clamp-3 text-xs leading-relaxed text-slate-500 dark:text-slate-400" x-text="item.description"></p>
+                      <!-- Descrição limitada a 2 linhas para abrir espaço à coleção -->
+                      <p
+                        x-show="item.description"
+                        class="mt-1.5 line-clamp-2 text-xs leading-relaxed text-slate-500 dark:text-slate-400"
+                        x-text="item.description"
+                      ></p>
+                    </div>
+
+                    <!-- Coleção na parte inferior do card -->
+                    <div
+                      x-show="itemCollectionLabel(item)"
+                      class="mt-2 flex min-w-0 items-center gap-1.5 text-[11px] font-semibold text-brand-700 dark:text-brand-300"
+                    >
+                      <svg class="h-3.5 w-3.5 flex-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+                        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z"></path>
+                      </svg>
+                      <span class="truncate" x-text="itemCollectionLabel(item)"></span>
                     </div>
                   </div>
                 </a>
               </template>
+            </div>
+
+            <!-- Smart loading: scroll sentinel + manual fallback -->
+            <div
+              x-show="!itemsLoading && !itemsError && filteredItems().length > 0"
+              class="mt-7 flex flex-col items-center gap-3"
+            >
+              <div x-init="observeSentinel($el)" class="h-px w-full" aria-hidden="true"></div>
+
+              <p
+                x-show="itemsSyncMode && itemsLoadingMore"
+                class="text-center text-xs font-medium text-slate-500 dark:text-slate-400"
+                x-text="t('searchLoadsAllHint')"
+              ></p>
+
+              <button
+                type="button"
+                class="btn-secondary btn-sm"
+                x-show="!itemsComplete && !itemsLoadingMore"
+                @click="loadMore()"
+                x-text="t('loadMore')"
+              ></button>
+
+              <span
+                x-show="itemsLoadingMore && !itemsSyncMode"
+                class="flex items-center gap-2 text-xs font-medium text-slate-500 dark:text-slate-400"
+              >
+                <span class="spinner text-brand-600"></span>
+                <span x-text="t('loadingMore')"></span>
+              </span>
+
+              <p
+                x-show="itemsComplete && items.length > limits.pageSize"
+                class="text-center text-[11px] font-medium text-slate-400 dark:text-slate-500"
+                x-text="t('loadMoreProgress', { loaded: items.length, total: itemsTotal || items.length })"
+              ></p>
             </div>
           </section>
 
@@ -986,7 +1139,50 @@
 
                   <div>
                     <div class="flex items-center justify-between gap-2">
-                      <label class="label" for="car-description" x-text="t('descriptionLabel')"></label>
+                      <label class="label" for="car-collection" x-text="t('collectionSelectLabel')"></label>
+                      <a :href="link('/collections')" class="text-[11px] font-semibold text-brand-700 hover:underline dark:text-brand-300" x-text="t('collectionManageFromForm')"></a>
+                    </div>
+                    <div class="mt-2 flex flex-col gap-2 sm:flex-row">
+                      <select id="car-collection" class="select text-base sm:flex-1" x-model="form.collectionId">
+                        <option value="" x-text="t('collectionSelectNone')"></option>
+                        <template x-for="collection in collections" :key="collection.id">
+                          <option :value="collection.id" x-text="collectionLabel(collection)"></option>
+                        </template>
+                      </select>
+                      <button
+                        type="button"
+                        class="btn-secondary shrink-0"
+                        @click="openCollectionForm(null, { returnTo: 'form' })"
+                      >
+                        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                          <path d="M12 5v14M5 12h14"></path>
+                        </svg>
+                        <span x-text="t('collectionNew')"></span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <label class="flex cursor-pointer items-start gap-3 rounded-xl border border-slate-200 bg-white p-3 transition hover:border-slate-300 dark:border-slate-700 dark:bg-slate-900 dark:hover:border-slate-600">
+                    <input
+                      type="checkbox"
+                      class="mt-0.5 h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
+                      x-model="form.specialEdition"
+                    />
+                    <span class="min-w-0">
+                      <span class="flex items-center gap-1.5 text-sm font-semibold">
+                        <img src="assets/icon/th_icon.png" alt="" class="h-4 w-4" />
+                        <span x-text="t('specialEditionLabel')"></span>
+                      </span>
+                      <span class="mt-0.5 block text-[11px] leading-relaxed text-slate-500 dark:text-slate-400" x-text="t('specialEditionHint')"></span>
+                    </span>
+                  </label>
+
+                  <div>
+                    <div class="flex items-center justify-between gap-2">
+                      <label class="label" for="car-description">
+                        <span x-text="t('descriptionLabel')"></span>
+                        <span class="ml-1.5 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-500 dark:bg-slate-800 dark:text-slate-400" x-text="t('descriptionOptional')"></span>
+                      </label>
                       <span class="text-[10px] tabular-nums text-slate-400 dark:text-slate-500" x-text="`${form.description.length} / ${limits.description}`"></span>
                     </div>
                     <textarea
@@ -995,7 +1191,7 @@
                       x-model="form.description"
                       :placeholder="t('descriptionHint')"
                       :maxlength="limits.description"
-                      rows="8"
+                      rows="6"
                       :class="{ 'is-invalid': formErrors.description }"
                     ></textarea>
                     <p class="field-error" x-show="formErrors.description" x-text="formErrors.description"></p>
@@ -1043,12 +1239,12 @@
           <!-- ITEM DETAILS                                                 -->
           <!-- ============================================================ -->
           <section x-show="route.name === 'details'" class="slide-up">
-            <div x-show="itemsLoading" class="card flex items-center gap-3 p-8">
+            <div x-show="itemsLoading || detailLoading" class="card flex items-center gap-3 p-8">
               <span class="spinner text-brand-600"></span>
               <span class="text-sm font-medium text-slate-500 dark:text-slate-400" x-text="t('loadingDetails')"></span>
             </div>
 
-            <div x-show="!itemsLoading && !itemsError && detailItem()" class="fade-in">
+            <div x-show="!itemsLoading && !detailLoading && !itemsError && detailItem()" class="fade-in">
               <a :href="link('/')" class="btn-ghost btn-sm -ml-2">
                 <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                   <path d="m15 18-6-6 6-6"></path>
@@ -1072,6 +1268,17 @@
                   <h1 class="mt-3 text-3xl font-extrabold leading-tight tracking-tight sm:text-4xl" x-text="detailItem()?.name || ''"></h1>
 
                   <div class="mt-5 flex flex-wrap gap-2">
+                    <span class="chip" x-show="itemCollectionLabel(detailItem())">
+                      <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+                        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z"></path>
+                      </svg>
+                      <span x-text="itemCollectionLabel(detailItem())"></span>
+                    </span>
+                    <span class="chip" x-show="detailItem()?.specialEdition">
+                      <img src="assets/icon/th_icon.png" alt="" class="h-3.5 w-3.5" />
+                      <span x-text="t('specialEditionLabel')"></span>
+                    </span>
                     <span class="chip">
                       <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
                         <rect x="3" y="5" width="18" height="16" rx="2"></rect>
@@ -1089,8 +1296,10 @@
 
                   <div class="my-7 divider"></div>
 
-                  <h2 class="text-base font-bold" x-text="t('descriptionLabel')"></h2>
-                  <p class="mt-2 whitespace-pre-line text-sm leading-relaxed text-slate-600 dark:text-slate-300" x-text="detailItem()?.description || ''"></p>
+                  <div x-show="detailItem()?.description">
+                    <h2 class="text-base font-bold" x-text="t('descriptionLabel')"></h2>
+                    <p class="mt-2 whitespace-pre-line text-sm leading-relaxed text-slate-600 dark:text-slate-300" x-text="detailItem()?.description || ''"></p>
+                  </div>
 
                   <div class="mt-8 flex flex-col gap-3 sm:flex-row">
                     <a :href="link(`/collection/${encodeURIComponent(detailItem()?.id || '')}/edit`)" class="btn-primary sm:flex-1">
@@ -1111,7 +1320,7 @@
               </div>
             </div>
 
-            <div x-show="!itemsLoading && itemsError" class="card mx-auto max-w-lg p-8 text-center" role="alert">
+            <div x-show="!itemsLoading && !detailLoading && itemsError" class="card mx-auto max-w-lg p-8 text-center" role="alert">
               <div class="mx-auto flex h-20 w-20 items-center justify-center rounded-2xl bg-red-50 text-red-600 dark:bg-red-950/30 dark:text-red-400">
                 <svg class="h-10 w-10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
                   <circle cx="12" cy="12" r="9"></circle>
@@ -1123,7 +1332,7 @@
               <button type="button" class="btn-secondary mt-5" @click="retryItems()" x-text="t('retry')"></button>
             </div>
 
-            <div x-show="!itemsLoading && !itemsError && !detailItem()" class="card mx-auto max-w-lg p-8 text-center">
+            <div x-show="!itemsLoading && !detailLoading && !itemsError && !detailItem()" class="card mx-auto max-w-lg p-8 text-center">
               <div class="mx-auto flex h-20 w-20 items-center justify-center rounded-2xl bg-amber-50 text-amber-600 dark:bg-amber-950/30 dark:text-amber-400">
                 <svg class="h-10 w-10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
                   <circle cx="12" cy="12" r="9"></circle>
@@ -1295,6 +1504,99 @@
           </section>
 
           <!-- ============================================================ -->
+          <!-- COLLECTIONS                                                  -->
+          <!-- ============================================================ -->
+          <section x-show="route.name === 'collections'" class="slide-up">
+            <div class="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+              <div>
+                <a :href="link('/')" class="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-500 transition hover:text-brand-700 dark:text-slate-400 dark:hover:text-brand-300">
+                  <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <path d="m15 5-7 7 7 7"></path>
+                  </svg>
+                  <span x-text="t('navCollection')"></span>
+                </a>
+                <h1 class="mt-3 text-3xl font-extrabold tracking-tight sm:text-4xl" x-text="t('collectionsTitle')"></h1>
+                <p class="mt-1.5 text-sm text-slate-500 dark:text-slate-400" x-text="t('collectionsSubtitle')"></p>
+              </div>
+              <button type="button" class="btn-primary shrink-0" @click="openCollectionForm()">
+                <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <path d="M12 5v14M5 12h14"></path>
+                </svg>
+                <span x-text="t('collectionNew')"></span>
+              </button>
+            </div>
+
+            <!-- Loading -->
+            <div x-show="collectionsLoading && !collections.length" class="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              <template x-for="i in 3" :key="i">
+                <div class="card h-32 animate-pulse bg-slate-100 dark:bg-slate-800"></div>
+              </template>
+            </div>
+
+            <!-- Error -->
+            <div x-show="!collectionsLoading && collectionsError" class="card mt-8 p-8 text-center">
+              <p class="text-sm text-red-600 dark:text-red-400" x-text="collectionsError"></p>
+              <button type="button" class="btn-secondary mt-4" @click="retryCollections()" x-text="t('retry')"></button>
+            </div>
+
+            <!-- Empty -->
+            <div x-show="!collectionsLoading && !collectionsError && !collections.length" class="card mt-8 p-8 text-center sm:p-12">
+              <span class="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-brand-50 text-brand-600 dark:bg-brand-950/40 dark:text-brand-300">
+                <svg class="h-7 w-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+                  <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+                  <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z"></path>
+                </svg>
+              </span>
+              <h2 class="mt-4 text-lg font-extrabold tracking-tight" x-text="t('collectionEmptyTitle')"></h2>
+              <p class="mx-auto mt-1.5 max-w-md text-sm text-slate-500 dark:text-slate-400" x-text="t('collectionEmptyDescription')"></p>
+              <button type="button" class="btn-primary mt-6" @click="openCollectionForm()">
+                <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <path d="M12 5v14M5 12h14"></path>
+                </svg>
+                <span x-text="t('collectionNew')"></span>
+              </button>
+            </div>
+
+            <!-- List -->
+            <div x-show="!collectionsLoading && !collectionsError && collections.length" class="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              <template x-for="collection in collections" :key="collection.id">
+                <article class="card card-hover flex flex-col p-5">
+                  <div class="flex items-start justify-between gap-3">
+                    <div class="min-w-0">
+                      <p class="truncate text-base font-bold tracking-tight" x-text="collection.name"></p>
+                      <p class="mt-0.5 text-xs font-semibold tabular-nums text-slate-500 dark:text-slate-400" x-text="collection.year"></p>
+                    </div>
+                    <span class="flex h-10 w-10 flex-none items-center justify-center rounded-xl bg-brand-50 text-brand-600 dark:bg-brand-950/40 dark:text-brand-300">
+                      <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+                        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+                        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z"></path>
+                      </svg>
+                    </span>
+                  </div>
+
+                  <p class="mt-4 text-xs font-semibold text-slate-500 dark:text-slate-400" x-text="collectionCountLabel(collectionCarCount(collection.id))"></p>
+
+                  <div class="mt-5 flex gap-2 border-t border-slate-100 pt-4 dark:border-slate-800">
+                    <button type="button" class="btn-secondary btn-sm flex-1" @click="openCollectionForm(collection)">
+                      <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                        <path d="M12 20h9"></path>
+                        <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"></path>
+                      </svg>
+                      <span x-text="t('edit')"></span>
+                    </button>
+                    <button type="button" class="btn-secondary btn-sm flex-1 text-red-600 hover:border-red-300 hover:bg-red-50 dark:text-red-400 dark:hover:border-red-900 dark:hover:bg-red-950/30" @click="requestDeleteCollection(collection)">
+                      <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                        <path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"></path>
+                      </svg>
+                      <span x-text="t('delete')"></span>
+                    </button>
+                  </div>
+                </article>
+              </template>
+            </div>
+          </section>
+
+          <!-- ============================================================ -->
           <!-- NOT FOUND                                                    -->
           <!-- ============================================================ -->
           <section x-show="route.name === 'notfound'" class="slide-up">
@@ -1359,6 +1661,116 @@
           <button type="button" class="btn-danger sm:flex-1" @click="confirmDelete()" :disabled="deleting">
             <span x-show="deleting" class="spinner"></span>
             <span x-text="deleting ? t('deleting') : t('confirmDelete')"></span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ================================================================ -->
+    <!-- COLLECTION FORM (create / edit)                                  -->
+    <!-- ================================================================ -->
+    <div
+      x-show="collectionForm.open"
+      x-cloak
+      x-transition.opacity
+      class="fixed inset-0 z-[60] flex items-center justify-center p-4"
+      @keydown.escape.window="closeCollectionForm()"
+      role="dialog"
+      aria-modal="true"
+    >
+      <div class="modal-backdrop absolute inset-0" @click="closeCollectionForm()"></div>
+      <div class="card modal-panel relative w-full max-w-md p-6">
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <h2 class="text-lg font-extrabold tracking-tight" x-text="collectionForm.mode === 'edit' ? t('collectionEdit') : t('collectionNew')"></h2>
+            <p class="mt-1 text-xs text-slate-500 dark:text-slate-400" x-text="t('collectionFormHint')"></p>
+          </div>
+          <button type="button" class="icon-btn -mr-1 -mt-1" @click="closeCollectionForm()" :title="t('close')" :aria-label="t('close')" :disabled="collectionForm.saving">
+            <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M6 6l12 12M18 6 6 18"></path>
+            </svg>
+          </button>
+        </div>
+
+        <form class="mt-5 space-y-4" @submit.prevent="submitCollectionForm()" novalidate>
+          <div>
+            <div class="flex items-center justify-between gap-2">
+              <label class="label" for="collection-name" x-text="t('collectionNameLabel')"></label>
+              <span class="text-[10px] tabular-nums text-slate-400 dark:text-slate-500" x-text="`${collectionForm.name.length} / ${limits.collectionName}`"></span>
+            </div>
+            <input
+              id="collection-name"
+              type="text"
+              class="input text-base"
+              x-model="collectionForm.name"
+              :placeholder="t('collectionNameHint')"
+              :maxlength="limits.collectionName"
+              autocomplete="off"
+              :class="{ 'is-invalid': collectionForm.errors.name }"
+            />
+            <p class="field-error" x-show="collectionForm.errors.name" x-text="collectionForm.errors.name"></p>
+          </div>
+
+          <div>
+            <label class="label" for="collection-year" x-text="t('collectionYearLabel')"></label>
+            <input
+              id="collection-year"
+              type="number"
+              inputmode="numeric"
+              class="input text-base"
+              x-model="collectionForm.year"
+              :placeholder="t('collectionYearHint')"
+              :min="limits.collectionYearMin"
+              :max="collectionFormYearMax()"
+              step="1"
+              :class="{ 'is-invalid': collectionForm.errors.year }"
+            />
+            <p class="field-error" x-show="collectionForm.errors.year" x-text="collectionForm.errors.year"></p>
+          </div>
+
+          <p x-show="collectionForm.error" class="rounded-xl bg-red-50 px-3 py-2 text-xs font-semibold text-red-700 dark:bg-red-950/40 dark:text-red-300" x-text="collectionForm.error"></p>
+
+          <div class="flex flex-col-reverse gap-2 pt-2 sm:flex-row">
+            <button type="button" class="btn-secondary sm:flex-1" @click="closeCollectionForm()" :disabled="collectionForm.saving" x-text="t('cancel')"></button>
+            <button type="submit" class="btn-primary sm:flex-1" :disabled="collectionForm.saving">
+              <span x-show="collectionForm.saving" class="spinner"></span>
+              <span x-text="collectionForm.saving ? t('saving') : t('save')"></span>
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- ================================================================ -->
+    <!-- COLLECTION DELETE CONFIRMATION                                   -->
+    <!-- ================================================================ -->
+    <div
+      x-show="collectionDelete.open"
+      x-cloak
+      x-transition.opacity
+      class="fixed inset-0 z-[60] flex items-center justify-center p-4"
+      @keydown.escape.window="cancelDeleteCollection()"
+      role="dialog"
+      aria-modal="true"
+    >
+      <div class="modal-backdrop absolute inset-0" @click="cancelDeleteCollection()"></div>
+      <div class="card modal-panel relative w-full max-w-md p-6">
+        <div class="flex items-start gap-3">
+          <span class="flex h-11 w-11 flex-none items-center justify-center rounded-xl bg-red-50 text-red-600 dark:bg-red-950/40 dark:text-red-400">
+            <svg class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+              <path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"></path>
+            </svg>
+          </span>
+          <div>
+            <h2 class="text-lg font-extrabold tracking-tight" x-text="t('collectionDeleteTitle')"></h2>
+            <p class="mt-1.5 text-sm leading-relaxed text-slate-500 dark:text-slate-400" x-text="deleteCollectionMessage()"></p>
+          </div>
+        </div>
+        <div class="mt-6 flex flex-col-reverse gap-2 sm:flex-row">
+          <button type="button" class="btn-secondary sm:flex-1" @click="cancelDeleteCollection()" :disabled="collectionDelete.deleting" x-text="t('cancel')"></button>
+          <button type="button" class="btn-danger sm:flex-1" @click="confirmDeleteCollection()" :disabled="collectionDelete.deleting">
+            <span x-show="collectionDelete.deleting" class="spinner"></span>
+            <span x-text="collectionDelete.deleting ? t('deleting') : t('confirmDelete')"></span>
           </button>
         </div>
       </div>
